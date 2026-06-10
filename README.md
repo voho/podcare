@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="logo.png" alt="Podcare" width="480">
-</p>
+![logo](https://github.com/voho/podcare/blob/main/logo.png?raw=true)
 
 # Podcare
 
