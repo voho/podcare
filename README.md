@@ -28,8 +28,9 @@ uv run podcare --help
 
 Everything runs on CPU. The first run that uses filler removal downloads the
 Whisper model (`large-v3` is ~3 GB; pick a smaller `--whisper-model` to skip
-that). DeepFilterNet3 weights ship inside the `deepfilternet` package, so
-denoise works offline from the start.
+that) plus the wav2vec2 forced-alignment model (~360 MB), both cached afterward.
+DeepFilterNet3 weights ship inside the `deepfilternet` package, so denoise works
+offline from the start.
 
 ---
 
@@ -100,7 +101,7 @@ You can still override individual stages — `--filler-sensitivity`, `--max-paus
 |---|---|---|
 | `--strength 0..1` | `0.8` | Universal processing intensity (see [above](#the-strength-knob)). Scales every strength-driven parameter in the pipeline. |
 | `--filler-sensitivity 0..1` | follows `--strength` | Override how aggressively non-lexical fillers ("um", "uh", "ehm", "hmm", …) are cut. `0` disables the stage. When unset, defaults to `0.7 × strength` (deliberately conservative to protect real speech). |
-| `--whisper-model NAME` | `large-v3` | faster-whisper model for filler detection. `large-v3` is most accurate (and slowest); `medium`/`small`/`base`/`tiny` trade accuracy for speed and download size. Only word timestamps/probabilities are used — never the transcript text — so this affects detection accuracy, not output wording. |
+| `--whisper-model NAME` | `large-v3` | faster-whisper model used to transcribe before forced alignment. `large-v3` is most accurate (and slowest); `medium`/`small`/`base`/`tiny` trade accuracy for speed and download size. The transcript is only used to locate filler words — never written to output. |
 | `--denoise-backend auto\|deepfilter\|spectral` | `auto` | Noise-reduction engine. `deepfilter` = DeepFilterNet3 neural (best). `spectral` = classical gating (`noisereduce`, fast, no torch). `auto` uses `deepfilter` when it imports, else `spectral`. |
 | `--max-pause SECONDS` | follows `--strength` | Override: silences longer than this get shortened. When unset, `lerp(3.5 → 1.0)` over strength. Must exceed `--target-pause`. |
 | `--target-pause SECONDS` | follows `--strength` | Override: the length an over-long pause is shortened *to*. When unset, `lerp(1.0 → 0.4)` over strength. |
@@ -350,18 +351,19 @@ exactly one timeline.
 ### 9. Filler-word removal — `--no-fillers`, `--filler-sensitivity`, `--whisper-model`
 
 **How it works.** Cuts non-lexical fillers — "um", "uh", "ehm", "er", "hmm",
-"mm", … — detected from **Whisper word timestamps**, not by listening for a
-sound. faster-whisper transcribes the mix with word-level timing and per-word
-probabilities; words whose normalized text is in the filler lexicon become cut
+"mm", … — located by transcription, not by listening for a sound. faster-whisper
+transcribes the mix, then **WhisperX force-aligns** that transcript with a
+wav2vec2 CTC model to get **phoneme-tight word boundaries** (much more precise
+than Whisper's own word timings — the difference between a clean cut and clipping
+the next word). Words whose normalized text is in the filler lexicon become cut
 candidates. Because Whisper tends to *skip* disfluencies, transcription is biased
 toward verbatim output (a filler-laden initial prompt,
 `condition_on_previous_text=False`). Sensitivity sets three gates a candidate
-must clear: a **probability floor** `0.9 − 0.6·sens`, a **minimum duration**
+must clear: an **alignment-score floor** `0.9 − 0.6·sens`, a **minimum duration**
 `0.24 − 0.2·sens` s, and (below 0.7) an **isolation** requirement that the filler
 be flanked by a small silence. Each accepted filler is removed with a short
-equal-power crossfade. Only timestamps/probabilities are used — the transcript
-text is never written anywhere. If faster-whisper isn't installed, the stage logs
-a warning and is skipped rather than failing.
+equal-power crossfade. The transcript is used only to locate fillers — never
+written to output.
 
 The effective sensitivity follows strength conservatively (`0.7 × strength`, so
 0.56 at the default) to protect real speech, and is overridden by an explicit
@@ -371,10 +373,11 @@ The effective sensitivity follows strength conservatively (`0.7 × strength`, so
 |---|---|---|
 | Stage enabled | on | CLI `--no-fillers` |
 | Sensitivity | `0.7 × strength` (0.56 @ 0.8) unless overridden | **Strength** / CLI `--filler-sensitivity` |
-| Probability floor | `0.9 − 0.6 × sensitivity` | Derived from sensitivity |
+| Alignment-score floor | `0.9 − 0.6 × sensitivity` | Derived from sensitivity |
 | Minimum duration | `0.24 − 0.2 × sensitivity` s | Derived from sensitivity |
 | Isolation required | when sensitivity < 0.7 | Derived from sensitivity |
-| Whisper model | large-v3 | CLI `--whisper-model` |
+| Transcription model | large-v3 (faster-whisper) | CLI `--whisper-model` |
+| Forced aligner | wav2vec2 CTC (WhisperX) | Hardcoded |
 | Cut edge padding | 12 ms | `Config.filler_pad_s` |
 | Filler lexicon | um/uh/ehm/er/hmm/… | Hardcoded |
 
