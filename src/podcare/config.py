@@ -1,0 +1,157 @@
+"""All pipeline tunables in one place.
+
+One universal `strength` knob (0..1) drives how hard every stage works; its
+meaning differs per stage (see the `*_from_strength` helpers below). A handful
+of fields are absolute *targets* or *formats* (loudness, sample rate, de-ess
+band edges) rather than intensities, so they are not strength-scaled.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+
+def _lerp(a: float, b: float, t: float) -> float:
+    return a + (b - a) * t
+
+
+@dataclass(frozen=True)
+class Config:
+    # Global — processing runs at 48 kHz (DeepFilterNet's native rate); the
+    # final encode resamples once to out_sr (16-bit + dither for WAV/FLAC).
+    sr: int = 48000
+    out_sr: int = 44100
+    keep_stems: Path | None = None
+
+    # Universal processing strength (0..1). The single intensity knob, calibrated
+    # so that strength=0 is a true no-op (every strength-driven stage is skipped;
+    # the pipeline becomes just align -> mixdown -> encode) and strength=1 is the
+    # most aggressive treatment. Each stage maps it to its own working parameters
+    # via the helpers at the bottom of this class, whose strength=0 endpoint is
+    # the identity value for that stage.
+    strength: float = 0.8
+
+    # Repair (restorative; not strength-scaled)
+    declip: bool = True
+    hpf_hz: float = 80.0
+
+    # Alignment / polarity (correctness; not strength-scaled)
+    align: bool = True
+    align_window_s: float = 300.0  # search the first N seconds for the offset
+    align_min_confidence: float = 12.0  # z-score of the GCC-PHAT peak required to apply a shift
+
+    # Denoise — "auto" uses DeepFilterNet3 (neural, best quality) when available
+    # and falls back to spectral gating; "deepfilter"/"spectral" force a backend.
+    denoise: bool = True
+    denoise_backend: str = "auto"
+
+    # Dereverb (WPE linear prediction; complements DeepFilterNet)
+    dereverb: bool = True
+    dereverb_chunk_s: float = 30.0
+    wpe_delay: int = 3
+
+    # Plosive ducking
+    plosives: bool = True
+    plosive_max_hz: float = 150.0
+
+    # De-esser (band edges are fixed; depth/threshold follow strength)
+    deess: bool = True
+    deess_lo_hz: float = 4500.0
+    deess_hi_hz: float = 9500.0
+
+    # Gate / level match (level target is absolute; gate depth follows strength)
+    gate: bool = True
+    level_target_dbfs: float = -20.0  # speech-active RMS target per track before mixdown
+
+    # Filler-word removal ("um", "ehm", ...). filler_sensitivity=None follows
+    # strength; set it explicitly (0..1, 0 disables) to override.
+    fillers: bool = True
+    filler_sensitivity: float | None = None
+    whisper_model: str = "large-v3"
+    filler_pad_s: float = 0.012
+
+    # Pause tightening. max/target pause = None follow strength; set to override.
+    tighten: bool = True
+    max_pause_s: float | None = None
+    target_pause_s: float | None = None
+    lead_trail_s: float = 0.5
+
+    # Mastering
+    master: bool = True
+    compress: bool = True
+    lufs: float = -16.0
+    true_peak_db: float = -1.5
+    mp3_bitrate: str = "192k"
+
+    # ------------------------------------------------------------------ #
+    # Strength → per-stage intensity. Defaults below are anchored so that
+    # strength=0.8 lands on strong-but-safe processing.
+    # ------------------------------------------------------------------ #
+    @property
+    def s(self) -> float:
+        return min(1.0, max(0.0, self.strength))
+
+    # Each helper's strength=0 endpoint is the identity (no-op) value for its
+    # stage; strength=1 is the most aggressive. Stages are also skipped outright
+    # at strength=0 (see pipeline.STAGES), so these endpoints mainly shape the
+    # smooth ramp just above 0.
+
+    # Denoise: 0 removes nothing, 1 removes the most.
+    def denoise_prop(self) -> float:
+        return _lerp(0.0, 1.0, self.s)
+
+    def df_atten_lim_db(self) -> float | None:
+        # DeepFilterNet attenuation ceiling in dB (0 = no attenuation); None =
+        # unlimited (full enhance) near the top.
+        return None if self.s >= 0.95 else _lerp(0.0, 60.0, self.s)
+
+    # Dereverb: longer filter + more iterations remove more reverb at higher cost.
+    def wpe_taps(self) -> int:
+        return int(round(_lerp(6, 16, self.s)))
+
+    def wpe_iterations(self) -> int:
+        return int(round(_lerp(1, 7, self.s)))
+
+    # Plosives: 0 flags ~nothing (very high burst threshold, shallow duck); 1
+    # catches the most and ducks hardest. Target stays below burst at all s.
+    def plosive_burst_mult(self) -> float:
+        return _lerp(24.0, 4.0, self.s)
+
+    def plosive_dominance(self) -> float:
+        return _lerp(0.8, 0.4, self.s)
+
+    def plosive_target_mult(self) -> float:
+        return _lerp(8.0, 3.0, self.s)
+
+    # De-ess: 0 never triggers / 0 dB reduction; 1 triggers easily and deeply.
+    def deess_ratio(self) -> float:
+        return _lerp(0.9, 0.3, self.s)
+
+    def deess_max_db(self) -> float:
+        return _lerp(0.0, 14.0, self.s)
+
+    # Gate: 0 dB expansion (no gating) at 0, deepest crosstalk suppression at 1.
+    def gate_depth_db(self) -> float:
+        return _lerp(0.0, 24.0, self.s)
+
+    # Fillers: 0 at strength 0 (off); deliberately conservative ceiling (protects
+    # real speech). Explicit --filler-sensitivity override wins.
+    def eff_filler_sensitivity(self) -> float:
+        if self.filler_sensitivity is not None:
+            return float(min(1.0, max(0.0, self.filler_sensitivity)))
+        return 0.7 * self.s
+
+    # Tighten: 0 keeps long pauses (no cutting); 1 tightens hardest.
+    def eff_max_pause(self) -> float:
+        return self.max_pause_s if self.max_pause_s is not None else _lerp(4.0, 1.0, self.s)
+
+    def eff_target_pause(self) -> float:
+        return self.target_pause_s if self.target_pause_s is not None else _lerp(1.2, 0.4, self.s)
+
+    # Master: 1:1 (no compression) at 0, firmest at 1.
+    def comp_ratio(self) -> float:
+        return _lerp(1.0, 3.5, self.s)
+
+    def comp_threshold(self) -> float:
+        return _lerp(0.30, 0.10, self.s)  # linear amplitude; lower = more compression

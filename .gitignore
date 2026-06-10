@@ -1,0 +1,16 @@
+.venv/
+.uv-cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+# Large local audio fixtures and processing artifacts
+tests/test-input-audio/
+stems/
+out/
+*.log
+.claude/
+.DS_Store
