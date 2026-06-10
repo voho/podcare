@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+import soxr
 
 log = logging.getLogger(__name__)
 
@@ -75,27 +76,26 @@ def _codec_args(out_path: Path, mp3_bitrate: str) -> tuple[list[str], bool]:
     raise FfmpegError(f"Unsupported output format {suffix!r} — use .wav, .mp3, .flac or .m4a")
 
 
-def encode(audio: np.ndarray, sr: int, out_path: Path, *, mp3_bitrate: str = "192k",
-           filters: str | None = None, out_ar: int | None = None) -> None:
-    """Encode a float32 mono array to the output file, optionally through a filtergraph.
+def encode(audio: np.ndarray, sr: int, out_path: Path, *, out_sr: int | None = None,
+           mp3_bitrate: str = "192k") -> None:
+    """Write a float32 mono array to out_path, resampling to out_sr with soxr (VHQ).
 
-    out_ar resamples at the end of the chain (also needed after loudnorm, which
-    internally upsamples to 192 kHz). For 16-bit PCM targets the same aresample
-    applies triangular-HP dither; lossy codecs are fed float directly.
+    Resampling is the single final step of the chain, done with soxr's
+    very-high-quality band-limited resampler. 16-bit PCM targets (WAV/FLAC) get
+    triangular-HP dither at quantization; lossy codecs are fed float directly.
     """
     codec, wants_s16 = _codec_args(out_path, mp3_bitrate)
+    audio = np.ascontiguousarray(audio, dtype=np.float32)
+    target_sr = out_sr or sr
+    if target_sr != sr:
+        audio = np.ascontiguousarray(
+            soxr.resample(audio, sr, target_sr, quality="VHQ"), dtype=np.float32)
     cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y",
-           "-f", "f32le", "-ar", str(sr), "-ac", "1", "-i", "-"]
-    chain = [filters] if filters else []
-    if out_ar:
-        resample = f"aresample=out_sample_rate={out_ar}:filter_size=64"
-        if wants_s16:
-            resample += ":out_sample_fmt=s16:dither_method=triangular_hp"
-        chain.append(resample)
-    if chain:
-        cmd += ["-af", ",".join(chain)]
+           "-f", "f32le", "-ar", str(target_sr), "-ac", "1", "-i", "-"]
+    if wants_s16:
+        cmd += ["-af", "aresample=out_sample_fmt=s16:dither_method=triangular_hp"]
     cmd += codec + [str(out_path)]
-    _run(cmd, input_bytes=np.ascontiguousarray(audio, dtype=np.float32).tobytes())
+    _run(cmd, input_bytes=audio.tobytes())
 
 
 def measure_loudnorm(audio: np.ndarray, sr: int, *, pre_filters: str | None,

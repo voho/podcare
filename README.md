@@ -433,8 +433,9 @@ loudness and true-peak targets are absolute, not strength-scaled.
 ### 12. Encode + resample
 
 **How it works.** A **single** resample to the output rate closes the chain —
-done here once, with an enlarged resampling kernel, rather than repeatedly
-mid-pipeline. WAV and FLAC are written **16-bit with triangular-HP dither** (the
+done here once with **soxr** (very-high-quality band-limited resampling), rather
+than repeatedly mid-pipeline. WAV and FLAC are written **16-bit with
+triangular-HP dither** (the
 correct way to reduce bit depth without quantization distortion); MP3/AAC are
 encoded from float at the chosen bitrate. The container is chosen from the output
 file's extension.
@@ -443,7 +444,7 @@ file's extension.
 |---|---|---|
 | Output sample rate | 44100 Hz | CLI `--out-sr` |
 | WAV/FLAC bit depth | 16-bit + triangular-HP dither | Hardcoded |
-| Resampler kernel size | 64 | Hardcoded |
+| Resampler | soxr VHQ (very-high-quality) | Hardcoded |
 | Lossy bitrate | 192k | CLI `--bitrate` |
 
 ---

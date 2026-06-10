@@ -28,7 +28,7 @@ def _finite(x) -> bool:
 def master_and_encode(track: Track, cfg: Config, out_path: Path) -> None:
     if not cfg.master:
         audio_io.encode(track.audio, cfg.sr, out_path,
-                        mp3_bitrate=cfg.mp3_bitrate, out_ar=cfg.out_sr)
+                        out_sr=cfg.out_sr, mp3_bitrate=cfg.mp3_bitrate)
         return
 
     # Loudness normalization always runs (even at strength 0) so the output hits
@@ -43,8 +43,8 @@ def master_and_encode(track: Track, cfg: Config, out_path: Path) -> None:
             and _finite(measured.get("target_offset"))):
         log.warning("master: program is silent/near-silent (input_i=%s) — skipping loudnorm",
                     measured.get("input_i"))
-        audio_io.encode(track.audio, cfg.sr, out_path, mp3_bitrate=cfg.mp3_bitrate,
-                        filters=pre, out_ar=cfg.out_sr)
+        audio = audio_io.filter_array(track.audio, cfg.sr, pre) if pre else track.audio
+        audio_io.encode(audio, cfg.sr, out_path, out_sr=cfg.out_sr, mp3_bitrate=cfg.mp3_bitrate)
         return
     log.info("master: measured %s LUFS, %s dBTP — normalizing to %.1f LUFS / %.1f dBTP",
              measured.get("input_i"), measured.get("input_tp"), cfg.lufs, cfg.true_peak_db)
@@ -55,5 +55,6 @@ def master_and_encode(track: Track, cfg: Config, out_path: Path) -> None:
         f":offset={measured['target_offset']}:linear=true"
     )
     graph = f"{pre},{loudnorm}" if pre else loudnorm
-    audio_io.encode(track.audio, cfg.sr, out_path, mp3_bitrate=cfg.mp3_bitrate,
-                    filters=graph, out_ar=cfg.out_sr)
+    # Master at the working rate, then soxr-resample to out_sr once in encode().
+    mastered = audio_io.filter_array(track.audio, cfg.sr, graph)
+    audio_io.encode(mastered, cfg.sr, out_path, out_sr=cfg.out_sr, mp3_bitrate=cfg.mp3_bitrate)
