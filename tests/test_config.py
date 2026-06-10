@@ -25,7 +25,6 @@ def test_strength_above_zero_enables_processing():
 
 def test_noop_endpoints_at_zero():
     c = Config(strength=0.0)
-    assert c.denoise_prop() == 0.0
     assert c.df_atten_lim_db() == 0.0
     assert c.deess_max_db() == 0.0
     assert c.gate_depth_db() == 0.0
@@ -38,7 +37,7 @@ def test_strength_default():
 
 
 @pytest.mark.parametrize("getter", [
-    lambda c: c.denoise_prop(),
+    lambda c: c.df_atten_lim_db() or 0.0,
     lambda c: c.wpe_taps(),
     lambda c: c.wpe_iterations(),
     lambda c: c.deess_max_db(),

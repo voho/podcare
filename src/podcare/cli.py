@@ -37,8 +37,6 @@ def build_parser() -> argparse.ArgumentParser:
                            "--strength)")
     tune.add_argument("--whisper-model", default="large-v3",
                       help="faster-whisper model for filler detection (default: large-v3)")
-    tune.add_argument("--denoise-backend", choices=["auto", "deepfilter", "spectral"],
-                      default="auto", help="neural (deepfilter) or classical denoiser")
     tune.add_argument("--max-pause", type=float, default=None, metavar="SECONDS",
                       help="override: pauses longer than this get shortened (default follows "
                            "--strength)")
@@ -99,7 +97,6 @@ def main(argv: list[str] | None = None) -> int:
         declip=not args.no_declip,
         align=not args.no_align,
         denoise=not args.no_denoise,
-        denoise_backend=args.denoise_backend,
         dereverb=not args.no_dereverb,
         plosives=not args.no_plosives,
         deess=not args.no_deess,

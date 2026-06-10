@@ -36,3 +36,6 @@ out/
 *.m4a
 *.aac
 *.ogg
+
+# Model checkpoints some libs write into CWD
+checkpoints/

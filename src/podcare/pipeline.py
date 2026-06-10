@@ -40,7 +40,7 @@ STAGES: list[Stage] = [
           lambda c: f"window={c.align_window_s:.0f}s conf_z>={c.align_min_confidence:.0f} "
                     f"(not strength-scaled)"),
     Stage("denoise", lambda c: c.s > 0 and c.denoise, "track", denoise.denoise_track,
-          lambda c: f"backend={c.denoise_backend} prop={c.denoise_prop():.2f} atten={_atten(c)}"),
+          lambda c: f"DeepFilterNet3 atten={_atten(c)}"),
     Stage("dereverb", lambda c: c.s > 0 and c.dereverb, "track", dereverb.dereverb_track,
           lambda c: f"WPE taps={c.wpe_taps()} iters={c.wpe_iterations()} delay={c.wpe_delay} "
                     f"chunk={c.dereverb_chunk_s:.0f}s"),

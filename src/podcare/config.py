@@ -41,10 +41,9 @@ class Config:
     align_window_s: float = 300.0  # search the first N seconds for the offset
     align_min_confidence: float = 12.0  # z-score of the GCC-PHAT peak required to apply a shift
 
-    # Denoise — "auto" uses DeepFilterNet3 (neural, best quality) when available
-    # and falls back to spectral gating; "deepfilter"/"spectral" force a backend.
+    # Denoise — DeepFilterNet3 (neural, full-band 48 kHz). Strength sets the
+    # attenuation ceiling (see df_atten_lim_db).
     denoise: bool = True
-    denoise_backend: str = "auto"
 
     # Dereverb (WPE linear prediction; complements DeepFilterNet)
     dereverb: bool = True
@@ -97,10 +96,7 @@ class Config:
     # at strength=0 (see pipeline.STAGES), so these endpoints mainly shape the
     # smooth ramp just above 0.
 
-    # Denoise: 0 removes nothing, 1 removes the most.
-    def denoise_prop(self) -> float:
-        return _lerp(0.0, 1.0, self.s)
-
+    # Denoise: 0 removes nothing (0 dB ceiling), 1 removes the most.
     def df_atten_lim_db(self) -> float | None:
         # DeepFilterNet attenuation ceiling in dB (0 = no attenuation); None =
         # unlimited (full enhance) near the top.

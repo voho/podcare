@@ -49,8 +49,8 @@ uv run podcare interview.mp3 -o clean.wav --filler-sensitivity 0.9
 # Turn off the stages you don't want
 uv run podcare raw.wav -o out.wav --no-dereverb --no-tighten
 
-# Faster preview pass (classical denoiser, small Whisper)
-uv run podcare a.flac b.flac -o draft.mp3 --denoise-backend spectral --whisper-model small
+# Faster preview pass (smaller Whisper, lighter dereverb)
+uv run podcare a.flac b.flac -o draft.mp3 --whisper-model small --strength 0.5
 
 # Debug: write every stage's intermediate audio so you can A/B them
 uv run podcare a.wav b.wav -o out.wav --keep-stems stems/
@@ -102,7 +102,6 @@ You can still override individual stages — `--filler-sensitivity`, `--max-paus
 | `--strength 0..1` | `0.8` | Universal processing intensity (see [above](#the-strength-knob)). Scales every strength-driven parameter in the pipeline. |
 | `--filler-sensitivity 0..1` | follows `--strength` | Override how aggressively non-lexical fillers ("um", "uh", "ehm", "hmm", …) are cut. `0` disables the stage. When unset, defaults to `0.7 × strength` (deliberately conservative to protect real speech). |
 | `--whisper-model NAME` | `large-v3` | faster-whisper model used to transcribe before forced alignment. `large-v3` is most accurate (and slowest); `medium`/`small`/`base`/`tiny` trade accuracy for speed and download size. The transcript is only used to locate filler words — never written to output. |
-| `--denoise-backend auto\|deepfilter\|spectral` | `auto` | Noise-reduction engine. `deepfilter` = DeepFilterNet3 neural (best). `spectral` = classical gating (`noisereduce`, fast, no torch). `auto` uses `deepfilter` when it imports, else `spectral`. |
 | `--max-pause SECONDS` | follows `--strength` | Override: silences longer than this get shortened. When unset, `lerp(3.5 → 1.0)` over strength. Must exceed `--target-pause`. |
 | `--target-pause SECONDS` | follows `--strength` | Override: the length an over-long pause is shortened *to*. When unset, `lerp(1.0 → 0.4)` over strength. |
 | `--lufs DB` | `-16` | Output integrated-loudness target (EBU R128). `-16` is the podcast/streaming norm; `-14` louder, `-19`/`-23` broadcast-quieter. |
@@ -118,7 +117,7 @@ Each switch disables one stage; everything else still runs.
 |---|---|
 | `--no-declip` | Distortion repair (declick + declip + rumble high-pass) |
 | `--no-align` | Inter-track time-offset and polarity correction |
-| `--no-denoise` | Noise reduction (neural or spectral) |
+| `--no-denoise` | Noise reduction (DeepFilterNet3) |
 | `--no-dereverb` | WPE dereverberation |
 | `--no-plosives` | Plosive ("p-pop") ducking |
 | `--no-deess` | De-essing (sibilance control) |
@@ -139,8 +138,8 @@ single timeline is edited and the tracks can never drift out of sync.
 
 ```
 decode ─ repair ─ align ─ denoise ─ dereverb ─ plosives ─ deess ─ gate ─┐
- (load   (declick  (offset  (DFN3 /   (WPE)     (LF burst  (sibilance (expander
-  48k)    declip    + pol.   spectral)           ducking)   control)   + level)
+ (load   (declick  (offset  (DFN3)    (WPE)     (LF burst  (sibilance (expander
+  48k)    declip    + pol.            ducking)             control)   + level)
           HPF)      fix)                                                     │
                                                                             ▼
    encode ◀─ master ◀─ tighten ◀─ fillers ◀─────────────────────────── mixdown
@@ -217,26 +216,22 @@ correctness fix.*
 
 ---
 
-### 3. Denoise — `--no-denoise`, `--denoise-backend`
+### 3. Denoise — `--no-denoise`
 
 **How it works.** Broadband noise reduction — room tone, hiss, fans, hum,
-distant traffic. Default backend is **DeepFilterNet3**, a full-band 48 kHz neural
+distant traffic — with **DeepFilterNet3**, a full-band 48 kHz neural
 speech-enhancement model that separates voice from noise far more cleanly than
-classical methods and also tames light reverb and breath noise; it's processed
-in 60 s chunks with a 1 s crossfade to bound memory on long files. The
-**spectral** backend is the classical `noisereduce` algorithm — much faster, no
-torch. Strength sets how much noise is removed: for DeepFilterNet it's an
-attenuation ceiling (unlimited at the top), for spectral it's the
-`prop_decrease`.
+classical methods and also tames light reverb and breath noise. Its weights ship
+inside the `deepfilternet` package (no download). Processed in 60 s chunks with a
+1 s crossfade to bound memory on hour-long files. Strength sets the attenuation
+ceiling — how much noise the model is allowed to remove (unlimited at the top).
 
 | Parameter | Value | Controlled by |
 |---|---|---|
 | Stage enabled | on | CLI `--no-denoise` |
-| Backend | auto → deepfilter | CLI `--denoise-backend` |
-| Spectral `prop_decrease` | `0.4 → 1.0` (0.88 @ 0.8) | **Strength** |
-| DFN attenuation ceiling | `6 → 60 dB`, none ≥ 0.95 (≈49 dB @ 0.8) | **Strength** |
+| Model | DeepFilterNet3 (48 kHz full-band) | Hardcoded |
+| Attenuation ceiling | `0 → 60 dB`, none ≥ 0.95 (≈48 dB @ 0.8) | **Strength** |
 | Chunk / crossfade | 60 s / 1 s | Hardcoded |
-| Spectral FFT size | 2048 | Hardcoded |
 
 > Note: DeepFilterNet 0.5.x imports `torchaudio.backend.common`, which newer
 > torchaudio removed. Podcare installs a tiny compatibility shim at import time
