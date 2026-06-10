@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="Podcare" width="480">
+</p>
+
 # Podcare
 
 Turn raw podcast mic recordings into a polished, broadcast-ready episode with one command.

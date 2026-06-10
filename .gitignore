@@ -1,16 +1,38 @@
-.venv/
-.uv-cache/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+*.egg
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Build artifacts
 dist/
 build/
-*.egg-info/
 
-# Large local audio fixtures and processing artifacts
+# Virtual env / tooling caches
+.venv/
+venv/
+.uv-cache/
+.python-version
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+.claude/
+
+# Local audio fixtures, rendered output, processing artifacts
 tests/test-input-audio/
 stems/
 out/
 *.log
-.claude/
-.DS_Store
+
+# Audio media (never commit raw or rendered audio; fixtures live untracked)
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.aac
+*.ogg
