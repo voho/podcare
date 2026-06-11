@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .. import audio_io
 from ..config import Config
+from ..dsp import db_to_lin
 from ..session import Track
 
 log = logging.getLogger(__name__)
@@ -16,6 +17,18 @@ log = logging.getLogger(__name__)
 def _compressor(cfg: Config) -> str:
     return (f"acompressor=threshold={cfg.comp_threshold():.3f}:ratio={cfg.comp_ratio():.2f}"
             ":attack=10:release=200:knee=4")
+
+
+def _limiter(cfg: Config) -> str:
+    """Brickwall true-peak safety limiter — the final master node, before the
+    single soxr resample. loudnorm's linear gain is not a real lookahead limiter,
+    so this catches the inter-sample / codec overs it can leave and lets the
+    program sit at the loudness target without clipping consumer DACs. Runs at the
+    48 kHz internal rate for ISP headroom; ``level=false`` so it never
+    auto-makeup-gains against loudnorm's loudness target. Delivery safety, not an
+    intensity — it runs whenever mastering is on, regardless of strength."""
+    return (f"alimiter=limit={db_to_lin(cfg.true_peak_db):.6f}"
+            ":attack=5:release=50:asc=1:level=false")
 
 
 def _finite(x) -> bool:
@@ -54,7 +67,8 @@ def master_and_encode(track: Track, cfg: Config, out_path: Path) -> None:
         f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
         f":offset={measured['target_offset']}:linear=true"
     )
-    graph = f"{pre},{loudnorm}" if pre else loudnorm
-    # Master at the working rate, then soxr-resample to out_sr once in encode().
+    # acompressor -> loudnorm -> true-peak limiter, all at the working rate; then
+    # a single soxr resample to out_sr in encode().
+    graph = ",".join(filter(None, [pre, loudnorm, _limiter(cfg)]))
     mastered = audio_io.filter_array(track.audio, cfg.sr, graph)
     audio_io.encode(mastered, cfg.sr, out_path, out_sr=cfg.out_sr, lossy_bitrate=cfg.lossy_bitrate)

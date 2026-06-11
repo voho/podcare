@@ -153,8 +153,8 @@ decode ──▶ repair ─ align ─ denoise ─ dereverb ─ plosives ─ dees
                                                                                        mixdown
    encode ◀──── master ◀──── tighten ◀──────────────────────────────────────────────  (sum→mono)
   (resample   (compress     (shorten
-   44.1k/16    + 2-pass      dead air)
-   + dither)   loudnorm)
+   44.1k/16    loudnorm      dead air)
+   + dither)   +TP-limit)
 ```
 
 Every stage section below follows the **same layout**:
@@ -480,12 +480,18 @@ and a soft aside (off at `--strength 0`). Then **two-pass loudness normalization
 target level): the first pass *measures* integrated loudness, range, and true
 peak; the second applies a **linear** gain to hit exactly the target LUFS with
 true peak under the ceiling. Two-pass + linear is what makes the result accurate
-and transparent rather than pumping. A silent/near-silent program (below
+and transparent rather than pumping. Finally, a **brickwall true-peak limiter**
+(`alimiter`, `level=false` so it never auto-makeup-gains against the loudness
+target) is the last node before the resample — loudnorm's single linear gain is
+not a real lookahead limiter, so this catches the inter-sample / codec overs it
+can leave and guarantees the delivered file never clips a consumer DAC. It runs
+at the 48 kHz internal rate for ISP headroom. A silent/near-silent program (below
 loudnorm's −70 LUFS gate) skips normalization and is emitted as-is rather than
 erroring.
 
-**Strength.** Firms up the compression (higher ratio, lower threshold); loudness
-and true-peak targets are absolute, not strength-scaled.
+**Strength.** Firms up the compression (higher ratio, lower threshold); loudness,
+true-peak targets, and the limiter are absolute delivery settings, not
+strength-scaled (the limiter runs at every strength, even 0).
 
 | Parameter | Value | Controlled by |
 |---|---|---|
@@ -498,6 +504,7 @@ and true-peak targets are absolute, not strength-scaled.
 | True-peak ceiling | −1.5 dBTP | `Config.true_peak_db` |
 | Loudness range (LRA) | 11 | Hardcoded |
 | Normalization | two-pass, linear | Hardcoded |
+| True-peak limiter | brickwall at the ceiling (`alimiter`, no makeup) | Hardcoded |
 
 ---
 
@@ -528,24 +535,28 @@ the delivered file's duration, rate, bit depth, loudness target, and size.
 
 The current chain removes defects and normalizes loudness well. The biggest
 remaining quality gains — distilled from a multi-engineer design review — are
-listed below in priority order. None are implemented yet; each is designed to
-slot cleanly into the existing order and to obey the same `--strength` contract
-(a true no-op at strength 0). All are achievable with the current stack
-(numpy/scipy/ffmpeg/torch); none need a new heavyweight dependency.
+listed below in priority order. Each is designed to slot cleanly into the
+existing order and to obey the same `--strength` contract (a true no-op at
+strength 0). All are achievable with the current stack (numpy/scipy/ffmpeg/torch);
+none need a new heavyweight dependency.
+
+> ✅ **Shipped:** the **true-peak limiter** (formerly the #2 must-have) is now part
+> of the [Master stage](#11-master----no-master---lufs---bitrate) — a brickwall
+> `alimiter` after loudnorm that guarantees the delivered file never
+> inter-sample-clips. The remaining proposals are below.
 
 | # | Proposed stage | Tier | Where | What it adds |
 |---|---|---|---|---|
 | 1 | **Tonal-balance / LTAS EQ** | must-have | per track, after dereverb | Measures each mic's long-term spectrum (Welch PSD over speech-active frames) and gently shapes it toward a broadcast voice curve (pink-ish tilt + presence) via ffmpeg `firequalizer`. Makes a dull lavalier and a bright condenser sit together and translates better on phone speakers. The single highest-impact lever after loudness. |
-| 2 | **True-peak limiter** | must-have | inside master, after loudnorm | A dedicated brickwall ISP limiter (ffmpeg `alimiter`) guarantees the delivered file never inter-sample-clips on consumer DACs and lossy encodes, and lets the master sit confidently at the loudness target. Runs as a delivery-safety step, not a strength dial. |
-| 3 | **Segment loudness leveler** | must-have | on the mono bus, before master | A slow (seconds-scale), gating-aware short-term-LUFS ride that evens out the minutes-scale loudness drift loudnorm's single global number ignores (a guest fading over a segment, a tired late take). Reuses the existing block-gain machinery at a long time constant. |
-| 4 | **De-hum / de-buzz** | high-value | per track, after repair | Detection-gated harmonic notch comb (`scipy.iirnotch`, zero-phase) that auto-detects 50/60 Hz mains and surgically removes its harmonics — the most instantly-noticeable amateur tell, which the 80 Hz HPF only dents and the neural denoiser doesn't reliably kill. Notches nothing on a clean track. |
-| 5 | **Multiband bus compressor** | high-value | inside master, replacing the single comp | Splits the bus into 3 phase-coherent bands (ffmpeg `acrossover`) and compresses each independently, so a boomy low-mid or a sibilant peak no longer ducks the whole program. Denser, more consistent loudness without pumping. |
-| 6 | **Dynamic resonance/harshness suppression** | high-value | per track, around de-ess | "Soothe-style" adaptive STFT notching of transient resonant peaks (ringy room modes, nasal honk, 2–5 kHz spikes) that static EQ can't catch because they come and go — a major cause of earbud fatigue. |
-| 7 | **Breath control** | high-value | per track, after gate | Detect-and-**duck** (not cut) audible inhales between phrases — the gate misses them because they sit above its threshold. Classifies non-speech islands as breath vs. silence by spectral shape and attenuates ~6–16 dB, preserving natural cadence. |
-| 8 | **Mouth-click / de-crackle** | nice-to-have | per track, after denoise | STFT transient removal of wet mouth clicks and lip smacks that `adeclick` (vinyl/digital impulses) and the neural denoiser leave intact — and which the cleaner the rest of the chain gets, the *more* audible they become. |
-| 9 | **Harmonic presence exciter** | nice-to-have | inside master, late | A touch of high-band saturation (ffmpeg `aexciter`) to restore "air" lost to heavy denoise/dereverb and to cut through tiny speakers — synthesizes new harmonics rather than boosting (possibly noisy) existing highs. Easy to overdo; conservative ceiling. |
-| 10 | **Dropout / short-gap restoration** | nice-to-have | per track, early | LPC/interpolation fill of brief (<~50 ms) signal dropouts from remote-guest packet loss, so remote guests sound locally recorded. Strict gap caps so it never fabricates real content. |
-| 11 | **Music-bed ducking + stereo delivery** | skip (unless requested) | I/O contract change | Sidechain-duck an optional intro/outro music bed under speech, and offer stereo (artifact-free dual-mono) output. Format/feature work, not a voice-fidelity fix — it would expand the "mics-in, one-mono-file-out" contract, so it's deferred. |
+| 2 | **Segment loudness leveler** | must-have | on the mono bus, before master | A slow (seconds-scale), gating-aware short-term-LUFS ride that evens out the minutes-scale loudness drift loudnorm's single global number ignores (a guest fading over a segment, a tired late take). Reuses the existing block-gain machinery at a long time constant. |
+| 3 | **De-hum / de-buzz** | high-value | per track, after repair | Detection-gated harmonic notch comb (`scipy.iirnotch`, zero-phase) that auto-detects 50/60 Hz mains and surgically removes its harmonics — the most instantly-noticeable amateur tell, which the 80 Hz HPF only dents and the neural denoiser doesn't reliably kill. Notches nothing on a clean track. |
+| 4 | **Multiband bus compressor** | high-value | inside master, replacing the single comp | Splits the bus into 3 phase-coherent bands (ffmpeg `acrossover`) and compresses each independently, so a boomy low-mid or a sibilant peak no longer ducks the whole program. Denser, more consistent loudness without pumping. |
+| 5 | **Dynamic resonance/harshness suppression** | high-value | per track, around de-ess | "Soothe-style" adaptive STFT notching of transient resonant peaks (ringy room modes, nasal honk, 2–5 kHz spikes) that static EQ can't catch because they come and go — a major cause of earbud fatigue. |
+| 6 | **Breath control** | high-value | per track, after gate | Detect-and-**duck** (not cut) audible inhales between phrases — the gate misses them because they sit above its threshold. Classifies non-speech islands as breath vs. silence by spectral shape and attenuates ~6–16 dB, preserving natural cadence. |
+| 7 | **Mouth-click / de-crackle** | nice-to-have | per track, after denoise | STFT transient removal of wet mouth clicks and lip smacks that `adeclick` (vinyl/digital impulses) and the neural denoiser leave intact — and which the cleaner the rest of the chain gets, the *more* audible they become. |
+| 8 | **Harmonic presence exciter** | nice-to-have | inside master, late | A touch of high-band saturation (ffmpeg `aexciter`) to restore "air" lost to heavy denoise/dereverb and to cut through tiny speakers — synthesizes new harmonics rather than boosting (possibly noisy) existing highs. Easy to overdo; conservative ceiling. |
+| 9 | **Dropout / short-gap restoration** | nice-to-have | per track, early | LPC/interpolation fill of brief (<~50 ms) signal dropouts from remote-guest packet loss, so remote guests sound locally recorded. Strict gap caps so it never fabricates real content. |
+| 10 | **Music-bed ducking + stereo delivery** | skip (unless requested) | I/O contract change | Sidechain-duck an optional intro/outro music bed under speech, and offer stereo (artifact-free dual-mono) output. Format/feature work, not a voice-fidelity fix — it would expand the "mics-in, one-mono-file-out" contract, so it's deferred. |
 
 **Suggested target order** once these land:
 `repair → de-hum → dropout-fix → align → denoise → dereverb → tonal-balance →

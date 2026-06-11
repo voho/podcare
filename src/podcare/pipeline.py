@@ -125,7 +125,7 @@ def run(inputs: list[Path], out_path: Path, cfg: Config) -> tuple[float, float]:
         comp = (f"comp={cfg.comp_ratio():.1f}:1@{cfg.comp_threshold():.2f} "
                 if cfg.compress and cfg.s > 0 else "comp=off ")
         params = (f"{comp}loudnorm I={cfg.lufs:.0f}LUFS TP={cfg.true_peak_db:.1f}dB "
-                  f"-> {cfg.out_sr}Hz")
+                  f"+TP-limiter -> {cfg.out_sr}Hz")
     else:
         params = f"raw mix, encode -> {cfg.out_sr}Hz"
     log.info("%s: start · %s", tag, params)

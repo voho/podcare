@@ -195,6 +195,39 @@ class TestMasterSilence:
         assert out.exists() and out.stat().st_size > 0
 
 
+class TestMasterLimiter:
+    def test_limiter_caps_hot_peaks_without_makeup(self):
+        from podcare import audio_io
+        from podcare.dsp import db_to_lin
+        from podcare.stages.master import _limiter
+        t = np.arange(SR) / SR
+        hot = (1.26 * np.sin(2 * np.pi * 200 * t)).astype(np.float32)  # +2 dBFS
+        out = audio_io.filter_array(hot, SR, _limiter(Config(true_peak_db=-1.5)))
+        assert len(out) == len(hot)
+        peak = float(np.max(np.abs(out[SR // 4:])))  # skip the attack ramp
+        # Capped at the -1.5 dBFS limit; sits near 0 dBFS if level=false were wrong.
+        assert peak <= db_to_lin(-1.5) * 1.02
+        assert peak > db_to_lin(-3.0)  # limited, not crushed
+
+    def test_master_holds_true_peak_ceiling(self, tmp_path):
+        from podcare import audio_io
+        from podcare.stages.master import master_and_encode
+        rng = np.random.default_rng(3)
+        t = np.arange(SR * 4) / SR
+        sig = (0.18 * np.sin(2 * np.pi * 180 * t)
+               + 0.05 * rng.standard_normal(len(t))).astype(np.float32)
+        for c in range(6):  # loud isolated transients -> high crest factor
+            i = int((0.3 + 0.6 * c) * SR)
+            sig[i:i + 40] += 0.95
+        out = tmp_path / "m.wav"
+        master_and_encode(Track("mix", sig.astype(np.float32)),
+                          Config(true_peak_db=-1.5), out)
+        a = audio_io.decode(out, SR)
+        m = audio_io.measure_loudnorm(a, SR, pre_filters=None, lufs=-16, true_peak=-1.5)
+        assert float(m["input_tp"]) <= -1.0, f"true peak {m['input_tp']} exceeds ceiling"
+        assert abs(float(m["input_i"]) - (-16.0)) < 1.5  # loudness target still hit
+
+
 class TestFillerDecisions:
     WORDS = [
         ("Hello", 0.0, 0.30, 0.99),
