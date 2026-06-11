@@ -50,7 +50,8 @@ def denoise_track(track: Track, cfg: Config) -> Track:
             out = enhance(model, df_state, t, atten_lim_db=atten)
         return out[0].cpu().numpy().astype(np.float32)
 
-    audio = process_chunked(track.audio, cfg.sr, run_chunk, chunk_s=_DF_CHUNK_S)
+    audio = process_chunked(track.audio, cfg.sr, run_chunk, chunk_s=_DF_CHUNK_S,
+                            label=f"denoise · {track.name}")
     before = float(np.mean(track.audio.astype(np.float64) ** 2)) + 1e-20
     after = float(np.mean(audio.astype(np.float64) ** 2)) + 1e-20
     log.info("denoise: %s — DeepFilterNet3, atten=%.0fdB, %+.1f dB energy change",

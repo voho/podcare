@@ -24,6 +24,14 @@ class Config:
     out_sr: int = 44100
     keep_stems: Path | None = None
 
+    # Timeline lock. When True, every stage that would change the audio's length
+    # or timing is skipped — inter-track alignment (shifts/pads), filler-word cuts
+    # and pause/silence tightening — so the output stays sample-for-sample on the
+    # input timeline. For cleaning audio that must drop straight back onto a video
+    # edit; all non-destructive stages (denoise, EQ, de-ess, gate, leveler, master,
+    # …) still run. (Set --out-sr to the source rate to also keep the sample count.)
+    nocut: bool = False
+
     # Universal processing strength (0..1). The single intensity knob, calibrated
     # so that strength=0 is a true no-op (every strength-driven stage is skipped;
     # the pipeline becomes just align -> mixdown -> encode) and strength=1 is the

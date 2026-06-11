@@ -57,6 +57,28 @@ def test_end_to_end(two_mic_session, tmp_path):
     assert abs(lufs - (-16.0)) < 1.5, f"loudness {lufs:.1f} LUFS"
 
 
+def test_nocut_disables_only_timeline_stages():
+    from podcare.pipeline import STAGES
+    by_name = {s.name: s for s in STAGES}
+    cut = Config()                  # defaults: align/fillers/tighten all on
+    nocut = Config(nocut=True)
+    for name in ("align", "fillers", "tighten"):
+        assert by_name[name].enabled(cut), f"{name} should run by default"
+        assert not by_name[name].enabled(nocut), f"{name} must be off under nocut"
+    # A non-destructive cleanup stage keeps running regardless.
+    assert by_name["denoise"].enabled(nocut)
+
+
+def test_nocut_preserves_timeline(two_mic_session, tmp_path):
+    # With nothing cut, the delivered audio must keep the input's full length
+    # (the 5 s pause survives) so it drops straight back onto a video edit.
+    out = tmp_path / "nocut.mp3"
+    cfg = Config(nocut=True, filler_sensitivity=0.0, denoise=False, align_window_s=20.0)
+    in_dur, out_dur = pipeline.run(list(two_mic_session), out, cfg)
+    assert out.exists()
+    assert abs(out_dur - in_dur) < 0.3, f"nocut changed length: {in_dur:.2f} -> {out_dur:.2f}"
+
+
 def test_single_track_wav_out(tmp_path):
     rng = np.random.default_rng(5)
     voice = speech_like(8, seed=5, level=0.35)

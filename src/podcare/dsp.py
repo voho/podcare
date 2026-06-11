@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
+
+from .progress import active
 
 
 def db_to_lin(db: float) -> float:
@@ -105,11 +109,12 @@ def remove_intervals(audio: np.ndarray, sr: int, intervals: list[tuple[float, fl
 
 
 def process_chunked(audio: np.ndarray, sr: int, fn, *, chunk_s: float,
-                    overlap_s: float = 1.0) -> np.ndarray:
+                    overlap_s: float = 1.0, label: str = "") -> np.ndarray:
     """Apply fn(chunk)->chunk over the signal in chunks with crossfaded overlap.
 
     Keeps memory bounded for whole-episode processing; the linear crossfade in
-    the overlap region hides any boundary discontinuity between chunks.
+    the overlap region hides any boundary discontinuity between chunks. `label`
+    titles the per-chunk progress sub-bar (no-op unless a live reporter is set).
     """
     chunk = int(chunk_s * sr)
     overlap = int(overlap_s * sr)
@@ -119,27 +124,36 @@ def process_chunked(audio: np.ndarray, sr: int, fn, *, chunk_s: float,
             raise ValueError(f"chunk fn changed length: {len(audio)} -> {len(out)}")
         return out
 
-    out = np.zeros(len(audio), dtype=np.float64)
-    weight = np.zeros(len(audio), dtype=np.float64)
-    start = 0
-    while start < len(audio):
-        end = min(len(audio), start + chunk + overlap)
-        piece = fn(audio[start:end]).astype(np.float64)
-        if len(piece) != end - start:
-            raise ValueError(f"chunk fn changed length: {end - start} -> {len(piece)}")
-        w = np.ones(len(piece))
-        if start > 0:
-            n = min(overlap, len(piece))
-            w[:n] = np.linspace(0.0, 1.0, n)
-        if end < len(audio):
-            n = min(overlap, len(piece))
-            w[-n:] = np.minimum(w[-n:], np.linspace(1.0, 0.0, n))
-        out[start:end] += piece * w
-        weight[start:end] += w
-        if end == len(audio):
-            break
-        start += chunk
-    return (out / np.maximum(weight, 1e-9)).astype(np.float32)
+    # Chunk count is exact for the loop below; end_sub() clamps the bar to full
+    # in case rounding ever leaves it a fraction short.
+    n_chunks = math.ceil((len(audio) - chunk - overlap) / chunk) + 1
+    reporter = active()
+    reporter.begin_sub(n_chunks, "chunk", label)
+    try:
+        out = np.zeros(len(audio), dtype=np.float64)
+        weight = np.zeros(len(audio), dtype=np.float64)
+        start = 0
+        while start < len(audio):
+            end = min(len(audio), start + chunk + overlap)
+            piece = fn(audio[start:end]).astype(np.float64)
+            if len(piece) != end - start:
+                raise ValueError(f"chunk fn changed length: {end - start} -> {len(piece)}")
+            w = np.ones(len(piece))
+            if start > 0:
+                n = min(overlap, len(piece))
+                w[:n] = np.linspace(0.0, 1.0, n)
+            if end < len(audio):
+                n = min(overlap, len(piece))
+                w[-n:] = np.minimum(w[-n:], np.linspace(1.0, 0.0, n))
+            out[start:end] += piece * w
+            weight[start:end] += w
+            reporter.advance_sub()
+            if end == len(audio):
+                break
+            start += chunk
+        return (out / np.maximum(weight, 1e-9)).astype(np.float32)
+    finally:
+        reporter.end_sub()
 
 
 def speech_threshold(rms: np.ndarray, *, floor_percentile: float = 10.0,

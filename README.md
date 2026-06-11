@@ -55,6 +55,10 @@ uv run podcare cz-show.flac -o out.mp3 --language cs
 # Turn off the stages you don't want
 uv run podcare raw.wav -o out.wav --no-dereverb --no-tighten
 
+# Clean the audio for a video edit without touching the timeline (no cuts:
+# same length, nothing aligned/tightened/filler-trimmed). Keep the source rate.
+uv run podcare scene-audio.wav -o scene-clean.wav --nocut --out-sr 48000
+
 # Faster preview pass (smaller Whisper, lighter dereverb)
 uv run podcare a.flac b.flac -o draft.mp3 --whisper-model small --strength 0.5
 
@@ -103,7 +107,9 @@ what `--strength` would have chosen.
 |---|---|---|
 | `AUDIO…` (positional) | — | One or more input files, one per mic/recorder. Any format ffmpeg can decode. All are resampled to 48 kHz mono float internally. |
 | `-o, --output PATH` | *required* | Output file. The extension picks the container: `.wav`, `.mp3`, `.flac`, `.m4a`/`.aac`. Parent dirs are created automatically. |
-| `-v, --verbose` | off | Debug-level logging (per-stage decisions, offsets, gains, frame counts). |
+| `-v, --verbose` | off | Debug-level logging (per-stage decisions, offsets, gains, frame counts). Forces `--progress plain`. |
+| `--progress {auto,rich,plain,none}` | `auto` | Progress display. **auto**: a live bar (overall stage progress + ETA, plus a sub-bar showing chunk/transcription progress inside the long stages) when stdout is a terminal, otherwise plain log lines. **rich**: force the live bar. **plain**: log lines only. **none**: warnings + the final `✓` summary only. |
+| `--nocut` | off | **Keep the original timeline.** Skips every stage that changes the audio's length or timing — alignment, filler-word cuts, and pause/silence tightening — so the output is sample-aligned with the input. Every non-destructive stage (denoise, EQ, de-ess, gate, leveler, master, …) still runs. Use when cleaning audio that has to drop straight back onto a video edit. Pair with `--out-sr <source rate>` to also preserve the exact sample count. |
 | `--version` | — | Print version and exit. |
 
 ### Tuning

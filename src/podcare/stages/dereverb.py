@@ -39,7 +39,7 @@ def _wpe_chunk(audio: np.ndarray, cfg: Config) -> np.ndarray:
 
 def dereverb_track(track: Track, cfg: Config) -> Track:
     audio = process_chunked(track.audio, cfg.sr, lambda chunk: _wpe_chunk(chunk, cfg),
-                            chunk_s=cfg.dereverb_chunk_s)
+                            chunk_s=cfg.dereverb_chunk_s, label=f"dereverb · {track.name}")
     before = float(np.mean(track.audio.astype(np.float64) ** 2)) + 1e-20
     after = float(np.mean(audio.astype(np.float64) ** 2)) + 1e-20
     log.info("dereverb: %s — %+.1f dB energy change", track.name, 10 * np.log10(after / before))

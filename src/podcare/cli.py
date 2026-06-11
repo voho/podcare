@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import __version__, pipeline
+from . import __version__, pipeline, progress
 from .audio_io import FfmpegError
 from .config import Config
 
@@ -29,6 +29,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="output file (.wav, .mp3, .flac, .m4a, .aac)")
     p.add_argument("--version", action="version", version=f"podcare {__version__}")
     p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    p.add_argument("--progress", choices=("auto", "rich", "plain", "none"), default="auto",
+                   help="progress display: auto (live bars on a terminal, plain logs when "
+                        "piped or under -v), rich (force live bars), plain (log lines only), "
+                        "none (warnings + final summary only)")
+    p.add_argument("--nocut", action="store_true",
+                   help="keep the original timeline: skip every length-changing stage "
+                        "(alignment, filler-word cuts, pause tightening) so the output stays "
+                        "sample-aligned with the input — for re-importing onto a video edit")
 
     tune = p.add_argument_group("tuning")
     tune.add_argument("--strength", type=float, default=0.8, metavar="0..1",
@@ -101,18 +109,50 @@ def _validate(args: argparse.Namespace) -> None:
         raise SystemExit("error: --bitrate must look like '192k' or '256000'")
 
 
+def _setup_logging(mode: str, verbose: bool, reporter: progress.Reporter) -> None:
+    """Route logging to match the progress mode.
+
+    Under the live display, log lines go through a rich handler tied to the same
+    console so they print cleanly above the bars; otherwise the plain formatter
+    is kept unchanged. 'none' quiets everything below warnings.
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    if mode == "rich" and reporter.console is not None:
+        from rich.logging import RichHandler
+        logging.basicConfig(
+            level=level,
+            format="%(message)s",
+            datefmt="[%X]",
+            handlers=[RichHandler(console=reporter.console, show_path=False,
+                                  show_time=False, markup=False, rich_tracebacks=True)],
+        )
+    elif mode == "none":
+        logging.basicConfig(level=logging.WARNING, format="%(levelname)-7s %(message)s")
+    else:
+        logging.basicConfig(level=level, format="%(levelname)-7s %(message)s")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)-7s %(message)s",
-    )
+    mode = progress.resolve_mode(args.progress, args.verbose)
+    reporter = progress.make_reporter(mode)
+    _setup_logging(mode, args.verbose, reporter)
     _validate(args)
     if args.no_fillers and args.filler_sensitivity is not None:
         log.warning("--filler-sensitivity is ignored because --no-fillers was given")
+    if args.nocut:
+        ignored = [name for name, given in (
+            ("--filler-sensitivity", args.filler_sensitivity is not None),
+            ("--max-pause", args.max_pause is not None),
+            ("--target-pause", args.target_pause is not None),
+        ) if given]
+        if ignored:
+            log.warning("%s ignored because --nocut keeps the original timeline",
+                        ", ".join(ignored))
 
     cfg = Config(
         keep_stems=args.keep_stems,
+        nocut=args.nocut,
         strength=args.strength,
         declip=not args.no_declip,
         dehum=not args.no_dehum,
@@ -139,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         lossy_bitrate=args.bitrate,
     )
     try:
-        in_dur, out_dur = pipeline.run(args.inputs, args.output, cfg)
+        in_dur, out_dur = pipeline.run(args.inputs, args.output, cfg, reporter=reporter)
     except (FfmpegError, FileNotFoundError) as exc:
         log.error("%s", exc)
         return 2

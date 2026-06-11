@@ -25,6 +25,7 @@ from scipy.signal import resample_poly
 from ..config import Config
 from ..dsp import (block_rms, merge_intervals, remove_intervals,
                    speech_threshold)
+from ..progress import active
 from ..session import Session, Track
 
 log = logging.getLogger(__name__)
@@ -133,7 +134,7 @@ def _get_align(language: str):
 
 
 def _transcribe_and_align(audio: np.ndarray, sr: int, model_name: str,
-                          language: str | None = None
+                          language: str | None = None, label: str = ""
                           ) -> list[tuple[str, float, float, float]]:
     """Transcribe with faster-whisper, then force-align with WhisperX.
 
@@ -147,10 +148,13 @@ def _transcribe_and_align(audio: np.ndarray, sr: int, model_name: str,
     ensure_ml_compat()
     audio16 = np.ascontiguousarray(
         resample_poly(audio.astype(np.float64), _WHISPER_SR, sr), dtype=np.float32)
+    reporter = active()
     try:
         import whisperx
 
         asr = _get_asr(model_name)
+        # transcribe() returns a lazy segment generator + info up front; drive the
+        # progress sub-bar by transcribed audio-seconds (info.duration) as we pull it.
         segments, info = asr.transcribe(
             audio16,
             language=language,
@@ -159,12 +163,18 @@ def _transcribe_and_align(audio: np.ndarray, sr: int, model_name: str,
             vad_filter=False,
             beam_size=5,
         )
-        segs = [{"start": float(s.start), "end": float(s.end), "text": s.text}
-                for s in segments]
+        reporter.begin_sub(info.duration, "s", f"transcribe · {label}")
+        segs, last = [], 0.0
+        for s in segments:
+            segs.append({"start": float(s.start), "end": float(s.end), "text": s.text})
+            reporter.advance_sub(max(0.0, float(s.end) - last))
+            last = float(s.end)
+        reporter.end_sub()
         lang = language or info.language
         log.info("fillers: transcribed %d segments (language %s)", len(segs), lang)
         if not segs:
             return []
+        reporter.begin_sub(0, "", f"align · {label}")  # opaque step → spinner
         align_model, meta = _get_align(lang)
         aligned = whisperx.align(segs, align_model, meta, audio16, "cpu",
                                  return_char_alignments=False)
@@ -172,6 +182,8 @@ def _transcribe_and_align(audio: np.ndarray, sr: int, model_name: str,
         log.warning("fillers: transcription/alignment unavailable (%s) — "
                     "leaving this track unedited", exc)
         return []
+    finally:
+        reporter.end_sub()
 
     words: list[tuple[str, float, float, float]] = []
     for seg in aligned["segments"]:
@@ -196,12 +208,13 @@ def remove_fillers_session(session: Session, cfg: Config) -> Session:
         return session
 
     masks = [_speech_mask(t.audio, session.sr) for t in session.tracks]
-    per_track = [
-        find_filler_intervals(
-            _transcribe_and_align(t.audio, session.sr, cfg.whisper_model, cfg.language),
-            sens, cfg.filler_pad_s)
-        for t in session.tracks
-    ]
+    n = len(session.tracks)
+    per_track = []
+    for i, t in enumerate(session.tracks, start=1):
+        label = f"{t.name} ({i}/{n})" if n > 1 else t.name
+        words = _transcribe_and_align(t.audio, session.sr, cfg.whisper_model,
+                                      cfg.language, label=label)
+        per_track.append(find_filler_intervals(words, sens, cfg.filler_pad_s))
     n_found = sum(len(p) for p in per_track)
     cuts = select_cross_track_safe(per_track, masks, _GUARD_BLOCK_S)
     if not cuts:

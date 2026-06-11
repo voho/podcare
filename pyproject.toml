@@ -16,6 +16,7 @@ dependencies = [
     "soxr>=1.1.0",
     "whisperx>=3.3.1",
     "certifi>=2026.5.20",
+    "rich>=13.0",
 ]
 
 [project.scripts]

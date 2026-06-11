@@ -40,3 +40,21 @@ def test_rejects_unsupported_output_format(infile, tmp_path):
     args = build_parser().parse_args([str(infile), "-o", str(tmp_path / "out.ogg")])
     with pytest.raises(SystemExit):
         _validate(args)
+
+
+def test_progress_flag_defaults_to_auto(infile, tmp_path):
+    args = build_parser().parse_args([str(infile), "-o", str(tmp_path / "out.wav")])
+    assert args.progress == "auto"
+
+
+def test_progress_flag_accepts_choices(infile, tmp_path):
+    for mode in ("auto", "rich", "plain", "none"):
+        args = build_parser().parse_args(
+            [str(infile), "-o", str(tmp_path / "out.wav"), "--progress", mode])
+        assert args.progress == mode
+
+
+def test_progress_flag_rejects_unknown(infile, tmp_path):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            [str(infile), "-o", str(tmp_path / "out.wav"), "--progress", "fancy"])

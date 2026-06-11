@@ -8,8 +8,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import audio_io
+from . import audio_io, progress
 from .config import Config
+from .progress import Reporter
 from .session import Session, Track
 from .stages import (align, breath, declick, deess, dehum, denoise, dereverb,
                      fillers, gate, leveler, master, mixdown, plosives, repair,
@@ -39,7 +40,7 @@ STAGES: list[Stage] = [
     Stage("dehum", lambda c: c.s > 0 and c.dehum, "track", dehum.dehum_track,
           lambda c: f"detect 50/60Hz mains, up to {c.dehum_max_harmonics()} harmonics "
                     f"(margin {c.dehum_margin_db():.0f}dB, Q={dehum._NOTCH_Q:.0f})"),
-    Stage("align", lambda c: c.align, "session", align.align_session,
+    Stage("align", lambda c: c.align and not c.nocut, "session", align.align_session,
           lambda c: f"window={c.align_window_s:.0f}s conf_z>={c.align_min_confidence:.0f} "
                     f"(not strength-scaled)"),
     Stage("denoise", lambda c: c.s > 0 and c.denoise, "track", denoise.denoise_track,
@@ -69,15 +70,16 @@ STAGES: list[Stage] = [
     # isolated voice; identical intervals are then removed from every track, so
     # they stay frame-synced going into the sum (the one timeline edit before
     # mixdown that is safe precisely because it is applied to all tracks alike).
-    Stage("fillers", lambda c: c.fillers and c.eff_filler_sensitivity() > 0, "session",
-          fillers.remove_fillers_session,
+    Stage("fillers", lambda c: c.fillers and c.eff_filler_sensitivity() > 0 and not c.nocut,
+          "session", fillers.remove_fillers_session,
           lambda c: f"sens={c.eff_filler_sensitivity():.2f} model={c.whisper_model} "
                     f"lang={c.language or 'auto'} pad={c.filler_pad_s * 1000:.0f}ms"),
     Stage("mixdown", lambda c: True, "session", mixdown.mixdown_session,
           lambda c: "sum->mono, headroom=-1dBFS"),
     # Pause tightening is the only timeline edit after mixdown — a single mono
     # track, so there is nothing left to keep in sync.
-    Stage("tighten", lambda c: c.s > 0 and c.tighten, "track", silence.tighten_track,
+    Stage("tighten", lambda c: c.s > 0 and c.tighten and not c.nocut, "track",
+          silence.tighten_track,
           lambda c: f"max_pause={c.eff_max_pause():.2f}s target={c.eff_target_pause():.2f}s "
                     f"lead/tail={c.lead_trail_s:.1f}s"),
     # Slow loudness ride on the mono bus, last before mastering so the compressor
@@ -109,48 +111,66 @@ def _dump_stems(session: Session, cfg: Config, idx: int, stage_name: str) -> Non
         audio_io.write_wav(out, track.audio, session.sr)
 
 
-def run(inputs: list[Path], out_path: Path, cfg: Config) -> tuple[float, float]:
-    """Process input files into out_path; returns (input, output) durations in s."""
+def run(inputs: list[Path], out_path: Path, cfg: Config,
+        reporter: Reporter | None = None) -> tuple[float, float]:
+    """Process input files into out_path; returns (input, output) durations in s.
+
+    `reporter` drives the optional live progress display; it defaults to a silent
+    no-op so library/test callers behave exactly as before.
+    """
+    reporter = reporter or progress.NullReporter()
     audio_io.require_ffmpeg()
     # Fail on an unwritable destination now, not after an hour of processing.
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    session = load_session(inputs, cfg)
-    in_duration = session.duration_s()
-    n_total = len(STAGES) + 1  # +1 for master+encode
+    n_total = len(STAGES) + 1  # +1 for master+encode; used in the [i/n] log tags
+    n_enabled = sum(1 for s in STAGES if s.enabled(cfg)) + 1  # the progress bar total
     t_pipeline = time.perf_counter()
 
-    for idx, stage in enumerate(STAGES, start=1):
-        tag = f"[{idx}/{n_total}] {stage.name}"
-        if not stage.enabled(cfg):
-            log.info("%s: skipped (disabled)", tag)
-            continue
-        log.info("%s: start · %s", tag, stage.describe(cfg))
-        t0 = time.perf_counter()
-        if stage.level == "session":
-            session = stage.fn(session, cfg)
+    with progress.use(reporter):
+        reporter.start(n_enabled)
+        session = load_session(inputs, cfg)
+        in_duration = session.duration_s()
+        done = 0
+
+        for idx, stage in enumerate(STAGES, start=1):
+            tag = f"[{idx}/{n_total}] {stage.name}"
+            if not stage.enabled(cfg):
+                log.info("%s: skipped (disabled)", tag)
+                continue
+            done += 1
+            log.info("%s: start · %s", tag, stage.describe(cfg))
+            reporter.begin_stage(done, n_enabled, stage.name, stage.describe(cfg))
+            t0 = time.perf_counter()
+            if stage.level == "session":
+                session = stage.fn(session, cfg)
+            else:
+                session = Session(session.sr, [stage.fn(t, cfg) for t in session.tracks])
+            dt = time.perf_counter() - t0
+            log.info("%s: done in %.1fs", tag, dt)
+            reporter.end_stage(stage.name, dt)
+            if cfg.keep_stems is not None:
+                _dump_stems(session, cfg, idx, stage.name)
+
+        if len(session.tracks) != 1:
+            raise RuntimeError(f"expected one track after mixdown, got {len(session.tracks)}")
+        final = session.tracks[0]
+        out_duration = final.n_samples / cfg.sr
+
+        tag = f"[{n_total}/{n_total}] master+encode"
+        if cfg.master:
+            comp = (f"mb-comp(3-band) {cfg.comp_ratio():.1f}:1@{cfg.comp_threshold():.2f} "
+                    if cfg.compress and cfg.s > 0 else "comp=off ")
+            params = (f"{comp}loudnorm I={cfg.lufs:.0f}LUFS TP={cfg.true_peak_db:.1f}dB "
+                      f"+TP-limiter -> {cfg.out_sr}Hz")
         else:
-            session = Session(session.sr, [stage.fn(t, cfg) for t in session.tracks])
-        log.info("%s: done in %.1fs", tag, time.perf_counter() - t0)
-        if cfg.keep_stems is not None:
-            _dump_stems(session, cfg, idx, stage.name)
-
-    if len(session.tracks) != 1:
-        raise RuntimeError(f"expected one track after mixdown, got {len(session.tracks)}")
-    final = session.tracks[0]
-    out_duration = final.n_samples / cfg.sr
-
-    tag = f"[{n_total}/{n_total}] master+encode"
-    if cfg.master:
-        comp = (f"mb-comp(3-band) {cfg.comp_ratio():.1f}:1@{cfg.comp_threshold():.2f} "
-                if cfg.compress and cfg.s > 0 else "comp=off ")
-        params = (f"{comp}loudnorm I={cfg.lufs:.0f}LUFS TP={cfg.true_peak_db:.1f}dB "
-                  f"+TP-limiter -> {cfg.out_sr}Hz")
-    else:
-        params = f"raw mix, encode -> {cfg.out_sr}Hz"
-    log.info("%s: start · %s", tag, params)
-    t0 = time.perf_counter()
-    master.master_and_encode(final, cfg, out_path)
-    log.info("%s: done in %.1fs", tag, time.perf_counter() - t0)
+            params = f"raw mix, encode -> {cfg.out_sr}Hz"
+        log.info("%s: start · %s", tag, params)
+        reporter.begin_stage(done + 1, n_enabled, "master+encode", params)
+        t0 = time.perf_counter()
+        master.master_and_encode(final, cfg, out_path)
+        dt = time.perf_counter() - t0
+        reporter.end_stage("master+encode", dt)
+        log.info("%s: done in %.1fs", tag, dt)
 
     if cfg.keep_stems is not None:
         # Capture the delivered file too, so the stems dir is a complete A/B set.
