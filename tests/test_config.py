@@ -18,8 +18,8 @@ def test_strength_zero_skips_enhancement_stages():
 
 def test_strength_above_zero_enables_processing():
     enabled = _enabled(0.8)
-    for name in ("repair", "denoise", "dereverb", "plosives", "deess", "gate",
-                 "fillers", "tighten", "mixdown", "align"):
+    for name in ("repair", "denoise", "dereverb", "tonebalance", "plosives",
+                 "deess", "gate", "fillers", "tighten", "mixdown", "align"):
         assert name in enabled, f"{name} should run at strength 0.8"
 
 

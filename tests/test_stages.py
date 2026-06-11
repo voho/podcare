@@ -12,6 +12,7 @@ from podcare.stages.mixdown import mixdown_session
 from podcare.stages.plosives import deplosive_track
 from podcare.stages.repair import repair_track
 from podcare.stages.silence import find_pause_cuts, tighten_track
+from podcare.stages.tonebalance import tonebalance_track
 
 from conftest import SR, speech_like
 
@@ -60,6 +61,55 @@ class TestRepair:
         out = repair_track(Track("x", clipped), CFG)
         after = np.mean(np.abs(out.audio) > 0.98)
         assert after < before * 0.7, f"clipping not reduced ({before:.3f} -> {after:.3f})"
+
+
+class TestDeHum:
+    def test_detects_and_notches_mains(self):
+        from podcare.stages.dehum import dehum_track
+        from scipy.signal import butter, sosfilt
+        voice = speech_like(8, seed=20, level=0.3)
+        t = np.arange(len(voice)) / SR
+        hum = sum(0.02 / k * np.sin(2 * np.pi * 50 * k * t)
+                  for k in range(1, 6)).astype(np.float32)
+        audio = (voice + hum).astype(np.float32)
+        out = dehum_track(Track("x", audio), CFG).audio
+        assert out.shape == audio.shape and np.isfinite(out).all()
+
+        def band(x, f0):
+            sos = butter(4, [f0 - 3, f0 + 3], btype="bandpass", fs=SR, output="sos")
+            return np.std(sosfilt(sos, x.astype(np.float64)))
+        assert 20 * np.log10(band(out, 50) / band(audio, 50) + 1e-12) < -12
+
+    def test_clean_track_untouched(self):
+        from podcare.stages.dehum import dehum_track
+        clean = speech_like(8, seed=21, level=0.3)
+        out = dehum_track(Track("c", clean), CFG).audio
+        assert np.array_equal(out, clean)
+
+
+class TestDeclick:
+    def test_removes_click_preserves_speech(self):
+        from podcare.stages.declick import declick_track
+        rng = np.random.default_rng(31)
+        voice = speech_like(6, seed=31, level=0.3)
+        voice[int(2.0 * SR):int(2.5 * SR)] *= 0.02  # quiet gap
+        ca = int(2.25 * SR)
+        click = np.zeros_like(voice)
+        click[ca:ca + 60] = (0.5 * rng.standard_normal(60)).astype(np.float32)
+        audio = (voice + click).astype(np.float32)
+        out = declick_track(Track("x", audio), CFG).audio
+        assert out.shape == audio.shape and np.isfinite(out).all()
+
+        def rms(x, a, b):
+            return float(np.sqrt(np.mean(x[a:b].astype(np.float64) ** 2)))
+        red = 20 * np.log10(rms(out, ca - 100, ca + 160) / rms(audio, ca - 100, ca + 160) + 1e-12)
+        assert red < -5, f"click only reduced {red:.1f} dB"
+
+    def test_clean_speech_untouched(self):
+        from podcare.stages.declick import declick_track
+        clean = speech_like(6, seed=33, level=0.3)
+        out = declick_track(Track("c", clean), CFG).audio
+        assert float(np.corrcoef(clean, out)[0, 1]) > 0.999
 
 
 class TestDeess:
@@ -171,6 +221,48 @@ class TestPlosives:
         assert np.allclose(out[tail], audio[tail], atol=2e-3)
 
 
+class TestToneBalance:
+    def test_balanced_track_no_correction(self):
+        from podcare.stages.tonebalance import _target_on_grid, tonal_correction
+        specs = tonal_correction(_target_on_grid(), fraction=0.27)
+        assert all(abs(g) < 0.1 for *_, g in specs)
+
+    def test_boomy_track_cuts_low(self):
+        from podcare.stages.tonebalance import _GRID, _target_on_grid, tonal_correction
+        meas = _target_on_grid().copy()
+        meas[_GRID <= 200] += 10.0  # excess low end
+        gains = {n: g for n, _k, _f, _q, g in tonal_correction(meas, 0.5)}
+        assert gains["low"] < -0.5
+
+    def test_dull_track_lifts_presence_clamped(self):
+        from podcare.stages.tonebalance import (_GRID, _MAX_BOOST_DB,
+                                                _target_on_grid, tonal_correction)
+        meas = _target_on_grid().copy()
+        meas[(_GRID >= 2200) & (_GRID <= 4500)] -= 12.0  # deficit in presence
+        gains = {n: g for n, _k, _f, _q, g in tonal_correction(meas, 1.0)}
+        assert gains["presence"] > 0.5
+        assert gains["presence"] <= _MAX_BOOST_DB + 1e-9  # clamped
+
+    def test_zero_fraction_is_identity(self):
+        from podcare.stages.tonebalance import _GRID, _target_on_grid, tonal_correction
+        meas = _target_on_grid().copy()
+        meas[_GRID <= 200] += 10.0
+        assert all(g == 0.0 for *_, g in tonal_correction(meas, 0.0))
+
+    def test_track_runs_and_reduces_boom(self):
+        from scipy.signal import butter, sosfilt
+        voice = speech_like(6, seed=15, level=0.3)
+        boom_sos = butter(2, [120, 320], btype="bandpass", fs=SR, output="sos")
+        boom = sosfilt(boom_sos, voice.astype(np.float64)).astype(np.float32) * 1.5
+        audio = (voice + boom).astype(np.float32)
+        out = tonebalance_track(Track("x", audio), CFG).audio
+        assert out.shape == audio.shape and np.isfinite(out).all()
+        meas_sos = butter(4, [150, 300], btype="bandpass", fs=SR, output="sos")
+        before = np.std(sosfilt(meas_sos, audio.astype(np.float64)))
+        after = np.std(sosfilt(meas_sos, out.astype(np.float64)))
+        assert after < before, f"boom not reduced ({before:.4f} -> {after:.4f})"
+
+
 class TestMixdown:
     def test_sums_to_single_track_with_headroom(self):
         a = np.full(SR, 0.8, dtype=np.float32)
@@ -208,6 +300,25 @@ class TestMasterLimiter:
         # Capped at the -1.5 dBFS limit; sits near 0 dBFS if level=false were wrong.
         assert peak <= db_to_lin(-1.5) * 1.02
         assert peak > db_to_lin(-3.0)  # limited, not crushed
+
+    def test_multiband_reduces_dynamics(self):
+        from podcare.stages.master import _apply_multiband
+        t = np.arange(SR * 3) / SR
+        sig = (0.1 * np.sin(2 * np.pi * 200 * t)).astype(np.float32)
+        loud = []
+        for c in range(5):  # sustained loud bursts over a quiet bed
+            i = int((0.4 + 0.5 * c) * SR)
+            sig[i:i + 4000] += 0.5
+            loud.append((i, i + 4000))
+        out = _apply_multiband(sig.astype(np.float32), Config())
+        assert len(out) == len(sig) and np.isfinite(out).all()
+
+        def rms(x, a, b):
+            return float(np.sqrt(np.mean(x[a:b].astype(np.float64) ** 2)) + 1e-12)
+        quiet = (int(0.05 * SR), int(0.35 * SR))
+        before = rms(sig, *loud[2]) / rms(sig, *quiet)
+        after = rms(out, *loud[2]) / rms(out, *quiet)
+        assert after < before, f"loud/quiet ratio not reduced ({before:.1f} -> {after:.1f})"
 
     def test_master_holds_true_peak_ceiling(self, tmp_path):
         from podcare import audio_io
@@ -256,6 +367,35 @@ class TestFillerDecisions:
             assert not (s < 0.15 < e) and not (s < 1.8 < e)
 
 
+class TestBreath:
+    def test_ducks_breath_preserves_speech(self):
+        from scipy.signal import butter, sosfilt
+        from podcare.stages.breath import breath_track
+        rng = np.random.default_rng(40)
+        v1 = speech_like(3, seed=40, level=0.35)
+        v2 = speech_like(3, seed=41, level=0.35)
+        gap = np.zeros(int(0.45 * SR), dtype=np.float32)
+        br = sosfilt(butter(2, [500, 3500], btype="bandpass", fs=SR, output="sos"),
+                     rng.standard_normal(len(gap)))
+        br = (0.025 * br / np.max(np.abs(br))).astype(np.float32)
+        seg = (gap + br).astype(np.float32)
+        audio = np.concatenate([v1, seg, v2]).astype(np.float32)
+        out = breath_track(Track("x", audio), CFG).audio
+        assert out.shape == audio.shape and np.isfinite(out).all()
+
+        def rms(x, a, b):
+            return float(np.sqrt(np.mean(x[a:b].astype(np.float64) ** 2)))
+        b0, b1 = len(v1), len(v1) + len(seg)
+        assert 20 * np.log10(rms(out, b0, b1) / rms(audio, b0, b1) + 1e-12) < -4
+        assert float(np.corrcoef(audio[:b0], out[:b0])[0, 1]) > 0.999  # speech kept
+
+    def test_clean_speech_untouched(self):
+        from podcare.stages.breath import breath_track
+        clean = speech_like(5, seed=44, level=0.35)
+        out = breath_track(Track("c", clean), CFG).audio
+        assert float(np.corrcoef(clean, out)[0, 1]) > 0.999
+
+
 class TestFillerCrossTrack:
     def test_is_silent_during(self):
         from podcare.stages.fillers import _is_silent_during
@@ -279,6 +419,29 @@ class TestFillerCrossTrack:
         masks = [np.ones(n, dtype=bool), other]
         # Only the isolated filler survives; the co-occurring one is kept (not cut).
         assert select_cross_track_safe(ivs, masks, 0.02) == [(1.0, 1.3)]
+
+
+class TestLeveler:
+    def test_evens_out_loudness_drift(self):
+        from podcare.stages.leveler import leveler_track
+        a = speech_like(6, seed=50, level=0.30)
+        b = speech_like(6, seed=51, level=0.11)  # quieter second segment
+        audio = np.concatenate([a, b]).astype(np.float32)
+        out = leveler_track(Track("x", audio), CFG).audio
+        assert out.shape == audio.shape and np.isfinite(out).all()
+
+        def rms(x):
+            return float(np.sqrt(np.mean(x.astype(np.float64) ** 2)))
+        h = len(a)
+        before = abs(20 * np.log10(rms(audio[h - 2 * SR:h]) / rms(audio[-2 * SR:])))
+        after = abs(20 * np.log10(rms(out[h - 2 * SR:h]) / rms(out[-2 * SR:])))
+        assert after < before - 2.0, f"drift not reduced ({before:.1f} -> {after:.1f} dB)"
+
+    def test_steady_level_barely_touched(self):
+        from podcare.stages.leveler import leveler_track
+        steady = speech_like(8, seed=52, level=0.25)
+        out = leveler_track(Track("c", steady), CFG).audio
+        assert float(np.corrcoef(steady, out)[0, 1]) > 0.99
 
 
 class TestSilence:

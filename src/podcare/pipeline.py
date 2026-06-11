@@ -11,8 +11,9 @@ from pathlib import Path
 from . import audio_io
 from .config import Config
 from .session import Session, Track
-from .stages import (align, deess, denoise, dereverb, fillers, gate, master,
-                     mixdown, plosives, repair, silence)
+from .stages import (align, breath, declick, deess, dehum, denoise, dereverb,
+                     fillers, gate, leveler, master, mixdown, plosives, repair,
+                     silence, tonebalance)
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,9 @@ class Stage:
 STAGES: list[Stage] = [
     Stage("repair", lambda c: c.s > 0 and (c.declip or c.hpf_hz > 0), "track", repair.repair_track,
           lambda c: f"declick+declip={'on' if c.declip else 'off'} hpf={c.hpf_hz:.0f}Hz"),
+    Stage("dehum", lambda c: c.s > 0 and c.dehum, "track", dehum.dehum_track,
+          lambda c: f"detect 50/60Hz mains, up to {c.dehum_max_harmonics()} harmonics "
+                    f"(margin {c.dehum_margin_db():.0f}dB, Q={dehum._NOTCH_Q:.0f})"),
     Stage("align", lambda c: c.align, "session", align.align_session,
           lambda c: f"window={c.align_window_s:.0f}s conf_z>={c.align_min_confidence:.0f} "
                     f"(not strength-scaled)"),
@@ -43,6 +47,13 @@ STAGES: list[Stage] = [
     Stage("dereverb", lambda c: c.s > 0 and c.dereverb, "track", dereverb.dereverb_track,
           lambda c: f"WPE taps={c.wpe_taps()} iters={c.wpe_iterations()} delay={c.wpe_delay} "
                     f"chunk={c.dereverb_chunk_s:.0f}s"),
+    Stage("tonebalance", lambda c: c.s > 0 and c.tonebalance, "track",
+          tonebalance.tonebalance_track,
+          lambda c: f"LTAS->broadcast curve, correction={c.eq_correction():.0%} "
+                    f"(clamp +{tonebalance._MAX_BOOST_DB:.0f}/-{tonebalance._MAX_CUT_DB:.0f}dB)"),
+    Stage("declick", lambda c: c.s > 0 and c.declick, "track", declick.declick_track,
+          lambda c: f"mid-band {declick._LO_HZ:.0f}-{declick._HI_HZ:.0f}Hz transients, "
+                    f"crest>{c.declick_crest():.0f}x in quiet gaps"),
     Stage("plosives", lambda c: c.s > 0 and c.plosives, "track", plosives.deplosive_track,
           lambda c: f"band<={c.plosive_max_hz:.0f}Hz burst>{c.plosive_burst_mult():.1f}xmed "
                     f"dom>{c.plosive_dominance():.2f} target={c.plosive_target_mult():.1f}xmed"),
@@ -51,6 +62,9 @@ STAGES: list[Stage] = [
                     f"max={c.deess_max_db():.1f}dB"),
     Stage("gate", lambda c: c.s > 0 and c.gate, "track", gate.gate_track,
           lambda c: f"depth={c.gate_depth_db():.1f}dB level={c.level_target_dbfs:.0f}dBFS"),
+    Stage("breath", lambda c: c.s > 0 and c.breath, "track", breath.breath_track,
+          lambda c: f"duck unvoiced inhales by {c.breath_depth_db():.0f}dB "
+                    f"({breath._MIN_BREATH_S:.2f}-{breath._MAX_BREATH_S:.1f}s)"),
     # Filler cuts run per track BEFORE mixdown so the ASR/aligner sees one clean
     # isolated voice; identical intervals are then removed from every track, so
     # they stay frame-synced going into the sum (the one timeline edit before
@@ -66,6 +80,11 @@ STAGES: list[Stage] = [
     Stage("tighten", lambda c: c.s > 0 and c.tighten, "track", silence.tighten_track,
           lambda c: f"max_pause={c.eff_max_pause():.2f}s target={c.eff_target_pause():.2f}s "
                     f"lead/tail={c.lead_trail_s:.1f}s"),
+    # Slow loudness ride on the mono bus, last before mastering so the compressor
+    # and limiter see already-consistent macro-dynamics.
+    Stage("leveler", lambda c: c.s > 0 and c.leveler, "track", leveler.leveler_track,
+          lambda c: f"slow ride +/-{c.leveler_range_db():.0f}dB over "
+                    f"{leveler._WINDOW_S:.0f}s windows toward median speech loudness"),
 ]
 
 
@@ -122,7 +141,7 @@ def run(inputs: list[Path], out_path: Path, cfg: Config) -> tuple[float, float]:
 
     tag = f"[{n_total}/{n_total}] master+encode"
     if cfg.master:
-        comp = (f"comp={cfg.comp_ratio():.1f}:1@{cfg.comp_threshold():.2f} "
+        comp = (f"mb-comp(3-band) {cfg.comp_ratio():.1f}:1@{cfg.comp_threshold():.2f} "
                 if cfg.compress and cfg.s > 0 else "comp=off ")
         params = (f"{comp}loudnorm I={cfg.lufs:.0f}LUFS TP={cfg.true_peak_db:.1f}dB "
                   f"+TP-limiter -> {cfg.out_sr}Hz")

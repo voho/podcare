@@ -58,6 +58,23 @@ def filter_array(audio: np.ndarray, sr: int, filters: str) -> np.ndarray:
     return np.frombuffer(proc.stdout, dtype=np.float32).copy()
 
 
+def filter_complex_array(audio: np.ndarray, sr: int, graph: str, *,
+                         out_label: str = "out") -> np.ndarray:
+    """Pipe a float32 mono array through an ffmpeg -filter_complex graph.
+
+    Unlike filter_array (simple, single in/out -af), this supports multi-pad
+    graphs (split/compress-per-band/mix) by mapping the named [out_label] pad.
+    """
+    proc = _run(
+        ["ffmpeg", "-hide_banner", "-nostdin",
+         "-f", "f32le", "-ar", str(sr), "-ac", "1", "-i", "-",
+         "-filter_complex", graph, "-map", f"[{out_label}]",
+         "-f", "f32le", "-ar", str(sr), "-ac", "1", "-"],
+        input_bytes=np.ascontiguousarray(audio, dtype=np.float32).tobytes(),
+    )
+    return np.frombuffer(proc.stdout, dtype=np.float32).copy()
+
+
 def write_wav(path: Path, audio: np.ndarray, sr: int) -> None:
     sf.write(str(path), audio, sr, subtype="FLOAT")
 

@@ -36,6 +36,9 @@ class Config:
     declip: bool = True
     hpf_hz: float = 80.0
 
+    # De-hum (mains-hum harmonic notching; detection-gated, strength-scaled)
+    dehum: bool = True
+
     # Alignment / polarity (correctness; not strength-scaled)
     align: bool = True
     align_window_s: float = 300.0  # search the first N seconds for the offset
@@ -50,6 +53,12 @@ class Config:
     dereverb_chunk_s: float = 30.0
     wpe_delay: int = 3
 
+    # Tonal-balance EQ (per-track LTAS match to a broadcast voice curve)
+    tonebalance: bool = True
+
+    # Mouth-click / de-crackle (short mid-band transient removal)
+    declick: bool = True
+
     # Plosive ducking
     plosives: bool = True
     plosive_max_hz: float = 150.0
@@ -63,6 +72,9 @@ class Config:
     gate: bool = True
     level_target_dbfs: float = -20.0  # speech-active RMS target per track before mixdown
 
+    # Breath control (detect + duck inhales between phrases)
+    breath: bool = True
+
     # Filler-word removal ("um", "ehm", ...). filler_sensitivity=None follows
     # strength; set it explicitly (0..1, 0 disables) to override.
     fillers: bool = True
@@ -70,6 +82,9 @@ class Config:
     whisper_model: str = "large-v3"
     language: str | None = None  # force ASR/alignment language; None = auto-detect
     filler_pad_s: float = 0.012
+
+    # Segment loudness leveler (slow gating-aware ride on the mono bus)
+    leveler: bool = True
 
     # Pause tightening. max/target pause = None follow strength; set to override.
     tighten: bool = True
@@ -97,12 +112,32 @@ class Config:
     # at strength=0 (see pipeline.STAGES), so these endpoints mainly shape the
     # smooth ramp just above 0.
 
+    # De-hum: strength scales how many harmonics are removed and how readily hum
+    # is detected. At strength 0 there are 0 harmonics and an unreachable
+    # detection margin, so it is a true no-op (and the stage is skipped anyway).
+    def dehum_max_harmonics(self) -> int:
+        return int(round(_lerp(0.0, 12.0, self.s)))
+
+    def dehum_margin_db(self) -> float:
+        return _lerp(20.0, 6.0, self.s)
+
     # Denoise: 0 removes nothing (0 dB ceiling), 1 removes the most.
     def df_atten_lim_db(self) -> float:
         # DeepFilterNet attenuation ceiling in dB (0 = no attenuation). Capped at
         # a finite 60 dB at the top — already effectively full suppression for
         # speech — so the single knob stays continuous (no jump to "unlimited").
         return _lerp(0.0, 60.0, self.s)
+
+    # Tonal balance: fraction of the measured LTAS deviation that is corrected.
+    # Deliberately gentle (strength / 3) so the EQ stays subtle even at full
+    # strength; 0 at strength 0 (identity).
+    def eq_correction(self) -> float:
+        return self.s / 3.0
+
+    # Mouth-click: crest-factor threshold a frame must clear to be flagged. Huge
+    # at strength 0 (nothing triggers -> identity), easing to 8× at full strength.
+    def declick_crest(self) -> float:
+        return _lerp(40.0, 8.0, self.s)
 
     # Dereverb: longer filter + more iterations remove more reverb at higher cost.
     def wpe_taps(self) -> int:
@@ -133,6 +168,11 @@ class Config:
     def gate_depth_db(self) -> float:
         return _lerp(0.0, 24.0, self.s)
 
+    # Breath: how far detected inhales are ducked. 0 dB at strength 0 (identity),
+    # capped at 14 dB at full strength — a duck, never a mute.
+    def breath_depth_db(self) -> float:
+        return _lerp(0.0, 14.0, self.s)
+
     # Fillers: 0 at strength 0 (off); deliberately conservative ceiling (protects
     # real speech). Explicit --filler-sensitivity override wins.
     def eff_filler_sensitivity(self) -> float:
@@ -146,6 +186,10 @@ class Config:
 
     def eff_target_pause(self) -> float:
         return self.target_pause_s if self.target_pause_s is not None else _lerp(1.2, 0.4, self.s)
+
+    # Leveler: maximum slow ride range (±dB). 0 at strength 0 (identity).
+    def leveler_range_db(self) -> float:
+        return _lerp(0.0, 8.0, self.s)
 
     # Master: 1:1 (no compression) at 0, firmest at 1.
     def comp_ratio(self) -> float:
