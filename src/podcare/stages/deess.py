@@ -25,8 +25,12 @@ def deess_track(track: Track, cfg: Config) -> Track:
     if len(track.audio) < sr // 10:
         return track
     hi = min(cfg.deess_hi_hz, sr / 2 * 0.98)
-    sos = butter(4, [cfg.deess_lo_hz, hi], btype="bandpass", fs=sr, output="sos")
-    band = sosfiltfilt(sos, track.audio.astype(np.float64)).astype(np.float32)
+    # float32 sos + float32 signal keeps the whole zero-phase filter in single
+    # precision, avoiding a full-length float64 copy of the track (multi-GB on
+    # hour-long episodes) for no audible loss on a 4th-order speech-band filter.
+    sos = butter(4, [cfg.deess_lo_hz, hi], btype="bandpass", fs=sr,
+                 output="sos").astype(np.float32)
+    band = sosfiltfilt(sos, track.audio).astype(np.float32)
     rest = track.audio - band
 
     band_rms = block_rms(band, _HOP)
@@ -35,7 +39,12 @@ def deess_track(track: Track, cfg: Config) -> Track:
 
     ratio, max_db = cfg.deess_ratio(), cfg.deess_max_db()
     min_gain = db_to_lin(-max_db)
-    audible = full_rms > db_to_lin(-45.0)
+    # Audibility gate relative to the track's own speech level (with an absolute
+    # floor). De-essing runs before the gate's per-track level match, so an
+    # absolute-only threshold would never engage on a quiet mic; pegging it
+    # ~30 dB below the speech reference tracks the recording's actual level.
+    speech_ref = float(np.percentile(full_rms, 90.0))
+    audible = full_rms > max(db_to_lin(-55.0), speech_ref * db_to_lin(-30.0))
     sibilant = (dominance > ratio) & audible
     gains = np.ones_like(band_rms)
     # Pull the band back to the dominance threshold, capped at deess_max_db.

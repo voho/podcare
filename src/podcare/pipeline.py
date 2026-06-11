@@ -18,8 +18,7 @@ log = logging.getLogger(__name__)
 
 
 def _atten(cfg: Config) -> str:
-    lim = cfg.df_atten_lim_db()
-    return "full" if lim is None else f"{lim:.0f}dB"
+    return f"{cfg.df_atten_lim_db():.0f}dB"
 
 
 @dataclass(frozen=True)
@@ -52,13 +51,18 @@ STAGES: list[Stage] = [
                     f"max={c.deess_max_db():.1f}dB"),
     Stage("gate", lambda c: c.s > 0 and c.gate, "track", gate.gate_track,
           lambda c: f"depth={c.gate_depth_db():.1f}dB level={c.level_target_dbfs:.0f}dBFS"),
+    # Filler cuts run per track BEFORE mixdown so the ASR/aligner sees one clean
+    # isolated voice; identical intervals are then removed from every track, so
+    # they stay frame-synced going into the sum (the one timeline edit before
+    # mixdown that is safe precisely because it is applied to all tracks alike).
+    Stage("fillers", lambda c: c.fillers and c.eff_filler_sensitivity() > 0, "session",
+          fillers.remove_fillers_session,
+          lambda c: f"sens={c.eff_filler_sensitivity():.2f} model={c.whisper_model} "
+                    f"lang={c.language or 'auto'} pad={c.filler_pad_s * 1000:.0f}ms"),
     Stage("mixdown", lambda c: True, "session", mixdown.mixdown_session,
           lambda c: "sum->mono, headroom=-1dBFS"),
-    # Timeline edits only after mixdown, so all tracks stay in sync.
-    Stage("fillers", lambda c: c.fillers and c.eff_filler_sensitivity() > 0, "track",
-          fillers.remove_fillers_track,
-          lambda c: f"sens={c.eff_filler_sensitivity():.2f} model={c.whisper_model} "
-                    f"pad={c.filler_pad_s * 1000:.0f}ms"),
+    # Pause tightening is the only timeline edit after mixdown — a single mono
+    # track, so there is nothing left to keep in sync.
     Stage("tighten", lambda c: c.s > 0 and c.tighten, "track", silence.tighten_track,
           lambda c: f"max_pause={c.eff_max_pause():.2f}s target={c.eff_target_pause():.2f}s "
                     f"lead/tail={c.lead_trail_s:.1f}s"),
@@ -129,6 +133,18 @@ def run(inputs: list[Path], out_path: Path, cfg: Config) -> tuple[float, float]:
     master.master_and_encode(final, cfg, out_path)
     log.info("%s: done in %.1fs", tag, time.perf_counter() - t0)
 
+    if cfg.keep_stems is not None:
+        # Capture the delivered file too, so the stems dir is a complete A/B set.
+        import shutil
+        cfg.keep_stems.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(out_path, cfg.keep_stems / f"{n_total:02d}-master{out_path.suffix.lower()}")
+
+    bit_depth = "/16-bit" if out_path.suffix.lower() in (".wav", ".flac") else ""
+    spec = (f"loudnorm I={cfg.lufs:.1f}LUFS TP={cfg.true_peak_db:.1f}dBTP"
+            if cfg.master else "raw mix")
+    log.info("output: %s — %.1f min, %d Hz%s, %s, %.1f MB", out_path.name,
+             out_duration / 60, cfg.out_sr, bit_depth, spec,
+             out_path.stat().st_size / 1e6)
     log.info("pipeline: %.1f min in -> %.1f min out in %.1fs total",
              in_duration / 60, out_duration / 60, time.perf_counter() - t_pipeline)
     return in_duration, out_duration

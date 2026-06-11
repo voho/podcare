@@ -11,6 +11,10 @@ def db_to_lin(db: float) -> float:
 
 def block_rms(audio: np.ndarray, hop: int) -> np.ndarray:
     """RMS per non-overlapping block of `hop` samples (tail block ignored)."""
+    if len(audio) == 0:
+        # Empty input would make np.mean return NaN and poison every downstream
+        # threshold; report a single silent block instead.
+        return np.full(1, float(np.sqrt(1e-20)), dtype=np.float32)
     n_blocks = len(audio) // hop
     if n_blocks == 0:
         return np.array([np.sqrt(np.mean(audio.astype(np.float64) ** 2) + 1e-20)],
@@ -74,6 +78,11 @@ def remove_intervals(audio: np.ndarray, sr: int, intervals: list[tuple[float, fl
     for s, e in intervals:
         s_i = max(0, min(len(audio), int(round(s * sr))))
         e_i = max(s_i, min(len(audio), int(round(e * sr))))
+        if e_i <= s_i:
+            # Interval rounds to under one sample — not a real cut. Skipping it
+            # avoids splitting the audio here and spuriously crossfading away
+            # ~xfade_s of good signal across a zero-width edit.
+            continue
         if s_i > pos:
             segments.append(audio[pos:s_i])
         pos = e_i
@@ -105,7 +114,10 @@ def process_chunked(audio: np.ndarray, sr: int, fn, *, chunk_s: float,
     chunk = int(chunk_s * sr)
     overlap = int(overlap_s * sr)
     if len(audio) <= chunk + overlap:
-        return fn(audio)
+        out = fn(audio)
+        if len(out) != len(audio):
+            raise ValueError(f"chunk fn changed length: {len(audio)} -> {len(out)}")
+        return out
 
     out = np.zeros(len(audio), dtype=np.float64)
     weight = np.zeros(len(audio), dtype=np.float64)

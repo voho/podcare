@@ -1,9 +1,33 @@
 import numpy as np
+import pytest
 
 from podcare.dsp import (block_rms, gain_to_samples, merge_intervals,
                          process_chunked, remove_intervals, smooth_gain)
 
 SR = 48000
+
+
+def test_block_rms_empty_is_finite():
+    # Empty input must not poison downstream thresholds with NaN.
+    rms = block_rms(np.zeros(0, dtype=np.float32), hop=480)
+    assert rms.shape == (1,)
+    assert np.isfinite(rms).all()
+
+
+def test_remove_intervals_subsample_is_noop():
+    # An interval that rounds to under one sample must not split/crossfade audio.
+    audio = np.ones(SR * 2, dtype=np.float32)
+    out = remove_intervals(audio, SR, [(1.0, 1.0 + 1e-7)], xfade_s=0.015)
+    assert len(out) == len(audio)
+    assert np.allclose(out, 1.0)
+
+
+def test_process_chunked_rejects_length_change_on_short_input():
+    # The single-chunk fast path enforces the same length invariant as the
+    # multi-chunk path, so a misbehaving fn can't silently drift the timeline.
+    audio = np.zeros(SR, dtype=np.float32)  # 1 s < chunk+overlap -> fast path
+    with pytest.raises(ValueError):
+        process_chunked(audio, SR, lambda c: c[:-10], chunk_s=60.0, overlap_s=1.0)
 
 
 def test_block_rms_constant_signal():

@@ -84,6 +84,27 @@ class TestDeess:
         lead = slice(0, SR // 2)
         assert np.allclose(out[lead], audio[lead], atol=0.02)
 
+    def test_reduces_sibilance_on_quiet_recording(self):
+        # Same sibilant burst at -26 dB: the adaptive audibility gate (relative to
+        # the track's own speech level) must still engage, where the old absolute
+        # -45 dBFS gate would mis-calibrate on a low-level mic.
+        rng = np.random.default_rng(7)
+        t = np.arange(SR * 2) / SR
+        voice = 0.3 * np.sin(2 * np.pi * 200 * t)
+        sib = np.zeros_like(voice)
+        burst = rng.standard_normal(SR // 4)
+        from scipy.signal import butter, sosfilt
+        sos = butter(4, [5000, 9000], btype="bandpass", fs=SR, output="sos")
+        sib[SR : SR + SR // 4] = 0.5 * sosfilt(sos, burst)
+        audio = (0.05 * (voice + sib)).astype(np.float32)  # quiet take
+
+        out = deess_track(Track("x", audio), CFG).audio
+        sib_region = slice(SR, SR + SR // 4)
+        band_before = sosfilt(sos, audio.astype(np.float64))[sib_region]
+        band_after = sosfilt(sos, out.astype(np.float64))[sib_region]
+        reduction_db = 20 * np.log10(np.std(band_after) / np.std(band_before) + 1e-12)
+        assert reduction_db < -3, f"quiet sibilance only reduced by {reduction_db:.1f} dB"
+
 
 class TestGate:
     def test_attenuates_noise_between_speech(self):
@@ -126,6 +147,16 @@ class TestDereverb:
 
 
 class TestPlosives:
+    def test_long_track_chunked_preserves_shape(self):
+        # A track longer than the 60 s chunk runs through process_chunked; it must
+        # keep its length and stay finite (the multi-hour OOM fix).
+        n = int(62 * SR)
+        t = np.arange(n) / SR
+        audio = (0.2 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
+        out = deplosive_track(Track("x", audio), CFG).audio
+        assert out.shape == audio.shape
+        assert np.isfinite(out).all()
+
     def test_edge_burst_does_not_wrap(self):
         # A plosive at the very start must not duck the very end (no np.roll wrap).
         rng = np.random.default_rng(21)
@@ -145,6 +176,13 @@ class TestMixdown:
         a = np.full(SR, 0.8, dtype=np.float32)
         b = np.full(SR, 0.8, dtype=np.float32)
         out = mixdown_session(Session(SR, [Track("a", a), Track("b", b)]), CFG)
+        assert len(out.tracks) == 1
+        assert np.max(np.abs(out.tracks[0].audio)) <= 10 ** (-1.0 / 20.0) + 1e-3
+
+    def test_single_track_gets_headroom(self):
+        # A lone hot track must still be brought under -1 dBFS before mastering.
+        loud = np.full(SR, 0.97, dtype=np.float32)
+        out = mixdown_session(Session(SR, [Track("solo", loud)]), CFG)
         assert len(out.tracks) == 1
         assert np.max(np.abs(out.tracks[0].audio)) <= 10 ** (-1.0 / 20.0) + 1e-3
 
@@ -183,6 +221,31 @@ class TestFillerDecisions:
         cuts = find_filler_intervals(self.WORDS, 1.0, 0.01)
         for s, e in cuts:
             assert not (s < 0.15 < e) and not (s < 1.8 < e)
+
+
+class TestFillerCrossTrack:
+    def test_is_silent_during(self):
+        from podcare.stages.fillers import _is_silent_during
+        mask = np.zeros(100, dtype=bool)
+        mask[50:60] = True  # speech in blocks 50..60 (1.00–1.20 s @ 0.02 s blocks)
+        assert _is_silent_during(mask, 0.0, 0.5, 0.02) is True
+        assert _is_silent_during(mask, 1.0, 1.2, 0.02) is False
+
+    def test_single_track_keeps_all_fillers(self):
+        from podcare.stages.fillers import select_cross_track_safe
+        ivs = [[(1.0, 1.3), (2.0, 2.2)]]
+        masks = [np.ones(400, dtype=bool)]
+        assert select_cross_track_safe(ivs, masks, 0.02) == [(1.0, 1.3), (2.0, 2.2)]
+
+    def test_drops_filler_when_another_speaker_talks_under_it(self):
+        from podcare.stages.fillers import select_cross_track_safe
+        n = 200  # 4 s @ 0.02 s blocks
+        ivs = [[(1.0, 1.3), (2.0, 2.3)], []]
+        other = np.zeros(n, dtype=bool)
+        other[100:116] = True  # track 1 talks during 2.0–2.3 s, silent at 1.0–1.3 s
+        masks = [np.ones(n, dtype=bool), other]
+        # Only the isolated filler survives; the co-occurring one is kept (not cut).
+        assert select_cross_track_safe(ivs, masks, 0.02) == [(1.0, 1.3)]
 
 
 class TestSilence:

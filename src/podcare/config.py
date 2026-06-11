@@ -68,6 +68,7 @@ class Config:
     fillers: bool = True
     filler_sensitivity: float | None = None
     whisper_model: str = "large-v3"
+    language: str | None = None  # force ASR/alignment language; None = auto-detect
     filler_pad_s: float = 0.012
 
     # Pause tightening. max/target pause = None follow strength; set to override.
@@ -81,7 +82,7 @@ class Config:
     compress: bool = True
     lufs: float = -16.0
     true_peak_db: float = -1.5
-    mp3_bitrate: str = "192k"
+    lossy_bitrate: str = "192k"  # MP3/AAC bitrate; ignored for WAV/FLAC
 
     # ------------------------------------------------------------------ #
     # Strength → per-stage intensity. Defaults below are anchored so that
@@ -97,10 +98,11 @@ class Config:
     # smooth ramp just above 0.
 
     # Denoise: 0 removes nothing (0 dB ceiling), 1 removes the most.
-    def df_atten_lim_db(self) -> float | None:
-        # DeepFilterNet attenuation ceiling in dB (0 = no attenuation); None =
-        # unlimited (full enhance) near the top.
-        return None if self.s >= 0.95 else _lerp(0.0, 60.0, self.s)
+    def df_atten_lim_db(self) -> float:
+        # DeepFilterNet attenuation ceiling in dB (0 = no attenuation). Capped at
+        # a finite 60 dB at the top — already effectively full suppression for
+        # speech — so the single knob stays continuous (no jump to "unlimited").
+        return _lerp(0.0, 60.0, self.s)
 
     # Dereverb: longer filter + more iterations remove more reverb at higher cost.
     def wpe_taps(self) -> int:
