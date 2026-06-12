@@ -600,3 +600,29 @@ class TestExciter:
         a, _ = sf.read(p_s0)
         b, _ = sf.read(p_off)
         assert np.array_equal(a, b), "strength=0 exciter must be a no-op"
+
+
+class TestBookends:
+    def test_assembles_with_crossfades(self, tmp_path):
+        prog = speech_like(4, seed=2, level=0.3)
+        t = np.arange(SR) / SR  # 1 s sting
+        sting = (0.2 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        out_path = tmp_path / "o.wav"
+        master_and_encode(Track("x", prog), Config(out_sr=SR), out_path,
+                          intro=sting, outro=sting)
+        a, file_sr = sf.read(out_path)
+        assert file_sr == SR
+        expected = len(sting) + len(prog) + len(sting) - 2 * int(0.1 * SR)
+        assert abs(len(a) - expected) < int(0.02 * SR), \
+            f"length {len(a)} != intro+prog+outro-2*xfade ({expected})"
+        # the joined program must still be true-peak safe
+        assert float(np.max(np.abs(a))) <= 1.0
+
+    def test_no_bookends_is_unchanged_behavior(self, tmp_path):
+        prog = speech_like(2, seed=2, level=0.3)
+        p1, p2 = tmp_path / "a.wav", tmp_path / "b.wav"
+        master_and_encode(Track("x", prog), Config(out_sr=SR), p1)
+        master_and_encode(Track("x", prog), Config(out_sr=SR), p2, intro=None, outro=None)
+        a, _ = sf.read(p1)
+        b, _ = sf.read(p2)
+        assert np.array_equal(a, b)

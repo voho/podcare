@@ -11,7 +11,7 @@ import numpy as np
 
 from .. import audio_io
 from ..config import Config
-from ..dsp import db_to_lin
+from ..dsp import crossfade_concat, db_to_lin
 from ..session import Track
 
 log = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 # Linkwitz-Riley crossover points (Hz) for the 3-band master compressor.
 _SPLIT_LO = 250
 _SPLIT_HI = 4000
+_BOOKEND_XF_S = 0.1  # equal-power crossfade at each bookend join
 
 
 def _band_comp(threshold: float, ratio: float, attack: int, release: int) -> str:
@@ -87,6 +88,57 @@ def _finite(x) -> bool:
         return False
 
 
+def _prepare_bookend(audio: np.ndarray, cfg: Config, name: str) -> np.ndarray:
+    """Loudness-align an intro/outro to the program target so a music sting
+    cannot blast ears relative to speech. A near-silent bookend (below
+    loudnorm's -70 LUFS gate) is used as-is, mirroring the silent-program
+    handling in master_and_encode."""
+    measured = audio_io.measure_loudnorm(audio, cfg.sr, pre_filters=None,
+                                         lufs=cfg.lufs, true_peak=cfg.true_peak_db)
+    if not (_finite(measured.get("input_i")) and _finite(measured.get("input_tp"))
+            and _finite(measured.get("target_offset"))):
+        log.warning("master: %s sound is silent/near-silent — using it as-is", name)
+        return audio
+    loudnorm = (
+        f"loudnorm=I={cfg.lufs}:TP={cfg.true_peak_db}:LRA=11"
+        f":measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
+        f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
+        f":offset={measured['target_offset']}:linear=true"
+    )
+    return audio_io.filter_array(audio, cfg.sr, loudnorm)
+
+
+def _assemble_bookends(program: np.ndarray, cfg: Config,
+                       intro: np.ndarray | None,
+                       outro: np.ndarray | None) -> tuple[np.ndarray, bool]:
+    """intro -> program -> outro with equal-power crossfades. Returns
+    (audio, joined); joined=False means no bookends were given.
+
+    Each join's crossfade is 100 ms clamped to half of THAT bookend, so a tiny
+    intro sting is never consumed whole by its own fade — and doesn't shorten
+    the outro's fade either."""
+    if intro is None and outro is None:
+        return program, False
+
+    def xf_for(bookend: np.ndarray) -> int:
+        return min(int(_BOOKEND_XF_S * cfg.sr), max(2, len(bookend) // 2))
+
+    out = program
+    xf_in = xf_out = 0
+    if intro is not None:
+        prepared = _prepare_bookend(intro, cfg, "intro")
+        xf_in = xf_for(prepared)
+        out = crossfade_concat([prepared, out], xf_in)
+    if outro is not None:
+        prepared = _prepare_bookend(outro, cfg, "outro")
+        xf_out = xf_for(prepared)
+        out = crossfade_concat([out, prepared], xf_out)
+    log.info("master: bookends — intro=%s outro=%s xfade=%d/%dms",
+             intro is not None, outro is not None,
+             int(1000 * xf_in / cfg.sr), int(1000 * xf_out / cfg.sr))
+    return out, True
+
+
 def _apply_multiband(audio: np.ndarray, cfg: Config) -> np.ndarray:
     out = audio_io.filter_complex_array(audio, cfg.sr, _multiband(cfg))
     # acrossover/amix preserve length, but pin it exactly so downstream timing
@@ -96,9 +148,18 @@ def _apply_multiband(audio: np.ndarray, cfg: Config) -> np.ndarray:
     return np.pad(out, (0, len(audio) - len(out)))
 
 
-def master_and_encode(track: Track, cfg: Config, out_path: Path) -> None:
+def master_and_encode(track: Track, cfg: Config, out_path: Path, *,
+                      intro: np.ndarray | None = None,
+                      outro: np.ndarray | None = None) -> None:
     if not cfg.master:
-        audio_io.encode(track.audio, cfg.sr, out_path,
+        assembled, joined = _assemble_bookends(track.audio, cfg, intro, outro)
+        if joined:
+            # Equal-power crossfades of same-sign material can peak ~1.27x; the
+            # raw mix was never limited, and encode hard-clips at int16. One
+            # delivery-safety limiter pass when (and only when) bookends were
+            # joined — the no-bookends raw path stays bit-identical.
+            assembled = audio_io.filter_array(assembled, cfg.sr, _limiter(cfg))
+        audio_io.encode(assembled, cfg.sr, out_path,
                         out_sr=cfg.out_sr, lossy_bitrate=cfg.lossy_bitrate)
         return
 
@@ -123,7 +184,8 @@ def master_and_encode(track: Track, cfg: Config, out_path: Path) -> None:
             and _finite(measured.get("target_offset"))):
         log.warning("master: program is silent/near-silent (input_i=%s) — skipping loudnorm",
                     measured.get("input_i"))
-        audio_io.encode(audio, cfg.sr, out_path, out_sr=cfg.out_sr, lossy_bitrate=cfg.lossy_bitrate)
+        assembled, _ = _assemble_bookends(audio, cfg, intro, outro)
+        audio_io.encode(assembled, cfg.sr, out_path, out_sr=cfg.out_sr, lossy_bitrate=cfg.lossy_bitrate)
         return
     log.info("master: measured %s LUFS, %s dBTP — normalizing to %.1f LUFS / %.1f dBTP",
              measured.get("input_i"), measured.get("input_tp"), cfg.lufs, cfg.true_peak_db)
@@ -135,4 +197,10 @@ def master_and_encode(track: Track, cfg: Config, out_path: Path) -> None:
     )
     # loudnorm -> true-peak limiter at the working rate; then one soxr resample.
     mastered = audio_io.filter_array(audio, cfg.sr, f"{loudnorm},{_limiter(cfg)}")
-    audio_io.encode(mastered, cfg.sr, out_path, out_sr=cfg.out_sr, lossy_bitrate=cfg.lossy_bitrate)
+    assembled, joined = _assemble_bookends(mastered, cfg, intro, outro)
+    if joined:
+        # crossfade overlaps of two TP-limited signals can momentarily sum
+        # above the ceiling — one more limiter pass over the joined program.
+        assembled = audio_io.filter_array(assembled, cfg.sr, _limiter(cfg))
+    audio_io.encode(assembled, cfg.sr, out_path, out_sr=cfg.out_sr,
+                    lossy_bitrate=cfg.lossy_bitrate)

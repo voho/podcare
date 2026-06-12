@@ -129,6 +129,10 @@ def run(inputs: list[Path], out_path: Path, cfg: Config,
     with progress.use(reporter):
         reporter.start(n_enabled)
         session = load_session(inputs, cfg)
+        # Decode bookends up front — a corrupt sting must fail now, not after
+        # an hour of processing (same fail-fast contract as the out_path check).
+        intro = audio_io.decode(cfg.intro_sound, cfg.sr) if cfg.intro_sound else None
+        outro = audio_io.decode(cfg.outro_sound, cfg.sr) if cfg.outro_sound else None
         in_duration = session.duration_s()
         done = 0
 
@@ -172,7 +176,7 @@ def run(inputs: list[Path], out_path: Path, cfg: Config,
         log.info("%s: start · %s", tag, params)
         reporter.begin_stage(done + 1, n_enabled, "master+encode", params)
         t0 = time.perf_counter()
-        master.master_and_encode(final, cfg, out_path)
+        master.master_and_encode(final, cfg, out_path, intro=intro, outro=outro)
         dt = time.perf_counter() - t0
         reporter.end_stage("master+encode", dt)
         log.info("%s: done in %.1fs", tag, dt)
