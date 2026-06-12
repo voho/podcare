@@ -75,6 +75,82 @@ before summing. A single pre-mixed file works too — the multi-track-only stage
 
 ---
 
+## MCP server
+
+Podcare ships an optional [Model Context Protocol](https://modelcontextprotocol.io)
+server (`src/podcare/mcp_server.py`) — a thin layer that publishes **every
+pipeline stage, plus the full pipeline, as MCP tools**, so an assistant (Claude
+Desktop, an IDE MCP client, the Agent SDK, …) can clean audio for you.
+
+### Install
+
+The server lives behind an optional extra so the core install stays lean:
+
+```bash
+uv sync --extra mcp        # adds the `mcp` SDK on top of the audio deps
+uv run podcare-mcp         # serve over stdio
+```
+
+(With pip: `pip install 'podcare[mcp]'`, then `podcare-mcp`.) ffmpeg must be on
+PATH, exactly as for the CLI.
+
+### Register it with a client
+
+Point any MCP client at the `podcare-mcp` command over stdio. For example, in
+Claude Desktop's `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "podcare": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/podcare", "podcare-mcp"]
+    }
+  }
+}
+```
+
+### Tools
+
+There are two ways to use it: the one-shot **`process`** tool (the whole
+pipeline, equivalent to the CLI), or the **per-stage** tools to run a single
+stage in isolation and chain them yourself.
+
+| Tool | What it does | Key params (defaults) |
+|---|---|---|
+| `process` | Full pipeline → one delivery file | `strength=0.8`, `nocut=false`, `lufs=-16`, `out_sr=44100`, `bitrate=192k`, `whisper_model=large-v3`, `language`, `filler_sensitivity`, `disable=[…]` |
+| `repair` | Declick + declip + rumble HPF | `declip=true`, `hpf_hz=80` |
+| `dehum` | Mains-hum harmonic notching | `strength=0.8` |
+| `align` | Inter-track offset + polarity (≥ 2 tracks) | `window_s=300`, `min_confidence=12` |
+| `denoise` | DeepFilterNet3 neural denoise | `strength=0.8` |
+| `dereverb` | WPE dereverberation | `strength=0.8`, `chunk_s=30`, `wpe_delay=3` |
+| `tonebalance` | LTAS → broadcast-voice EQ | `strength=0.8` |
+| `declick` | Mouth-click / de-crackle | `strength=0.8` |
+| `plosives` | Plosive ("p-pop") ducking | `strength=0.8`, `max_hz=150` |
+| `deess` | Sibilance control | `strength=0.8`, `lo_hz=4500`, `hi_hz=9500` |
+| `gate` | Crosstalk gate + level match | `strength=0.8`, `level_target_dbfs=-20` |
+| `breath` | Breath ducking | `strength=0.8` |
+| `fillers` | Filler-word removal (ASR + align) | `strength=0.8`, `sensitivity`, `whisper_model`, `language`, `pad_s` |
+| `mixdown` | Sum cleaned tracks → mono program | — |
+| `tighten` | Pause / dead-air tightening | `strength=0.8`, `max_pause_s`, `target_pause_s`, `lead_trail_s=0.5` |
+| `leveler` | Slow segment-loudness ride | `strength=0.8` |
+| `master` | MB-comp + loudnorm + TP-limit + encode | `strength=0.8`, `compress=true`, `lufs=-16`, `true_peak_db=-1.5`, `out_sr=44100`, `bitrate=192k` |
+
+Every param defaults to the same value as the CLI (sourced from
+[src/podcare/config.py](src/podcare/config.py)); `strength` is the one universal
+intensity knob (see [below](#the-strength-knob)).
+
+**Inputs/outputs.** Each stage tool takes one or more input files and an
+`output_dir`, applies just that stage, and writes the result as **48 kHz float
+WAV(s)** (loss-free, so stages chain cleanly) — one output per input, named after
+the source. `master` and `process` instead take an `output_path` and produce a
+real delivery file, choosing the container from its extension
+(`.wav/.mp3/.flac/.m4a/.aac`) and resampling once at the end. The `process`
+tool's `disable` list turns stages off by name (e.g. `["dereverb", "tighten"]`),
+mirroring the CLI's `--no-*` flags.
+
+---
+
 ## The `--strength` knob
 
 Podcare has **one universal intensity dial**, `--strength` (0–1, default
