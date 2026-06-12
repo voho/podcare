@@ -1,8 +1,13 @@
 """CLI argument validation fails fast on nonsense, before any processing."""
 
+import logging
+from pathlib import Path
+
 import pytest
 
+from podcare import cli
 from podcare.cli import _validate, build_parser
+from podcare.pipeline import STAGES
 
 
 @pytest.fixture
@@ -58,3 +63,48 @@ def test_progress_flag_rejects_unknown(infile, tmp_path):
     with pytest.raises(SystemExit):
         build_parser().parse_args(
             [str(infile), "-o", str(tmp_path / "out.wav"), "--progress", "fancy"])
+
+
+# --------------------------------------------------------------------------- #
+# New stages + intro/outro bookends
+# --------------------------------------------------------------------------- #
+
+def _args(argv):
+    return cli.build_parser().parse_args(argv)
+
+
+def test_new_stages_registered_in_order():
+    names = [s.name for s in STAGES]
+    assert names.index("dropouts") < names.index("repair")
+    assert names.index("deess") < names.index("resonance") < names.index("gate")
+
+
+def test_bookend_flags_parse(tmp_path):
+    intro = tmp_path / "i.wav"
+    intro.write_bytes(b"")
+    args = _args(["in.wav", "-o", "out.mp3", "--intro-sound", str(intro)])
+    assert args.intro_sound == intro and args.outro_sound is None
+
+
+def test_nocut_ignores_bookends(caplog):
+    args = _args(["in.wav", "-o", "out.mp3", "--nocut",
+                  "--intro-sound", "i.wav", "--outro-sound", "o.wav"])
+    with caplog.at_level(logging.WARNING):
+        intro, outro = cli._effective_bookends(args)
+    assert intro is None and outro is None
+    assert "--intro-sound" in caplog.text and "--nocut" in caplog.text
+
+
+def test_bookends_kept_without_nocut():
+    args = _args(["in.wav", "-o", "out.mp3", "--intro-sound", "i.wav"])
+    intro, outro = cli._effective_bookends(args)
+    assert intro == Path("i.wav") and outro is None
+
+
+def test_validate_rejects_missing_bookend(tmp_path):
+    src = tmp_path / "in.wav"
+    src.write_bytes(b"")
+    args = _args([str(src), "-o", str(tmp_path / "out.mp3"),
+                  "--intro-sound", str(tmp_path / "missing.wav")])
+    with pytest.raises(SystemExit, match="intro-sound"):
+        cli._validate(args)

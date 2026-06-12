@@ -62,9 +62,17 @@ def build_parser() -> argparse.ArgumentParser:
     tune.add_argument("--bitrate", default="192k", help="mp3/aac bitrate (default 192k)")
     tune.add_argument("--keep-stems", type=Path, metavar="DIR",
                       help="write per-stage intermediate WAVs into DIR")
+    tune.add_argument("--intro-sound", type=Path, default=None, metavar="AUDIO",
+                      help="optional sound placed before the program (loudness-matched to "
+                           "the output target, joined with a 100 ms crossfade); ignored "
+                           "with --nocut")
+    tune.add_argument("--outro-sound", type=Path, default=None, metavar="AUDIO",
+                      help="optional sound placed after the program (loudness-matched, "
+                           "100 ms crossfade); ignored with --nocut")
 
     toggles = p.add_argument_group("stage toggles")
     for flag, help_text in [
+        ("dropouts", "dropout / short-gap restoration"),
         ("declip", "distortion repair (declick/declip)"),
         ("dehum", "mains-hum (50/60 Hz) harmonic removal"),
         ("align", "inter-track offset/polarity correction"),
@@ -74,11 +82,13 @@ def build_parser() -> argparse.ArgumentParser:
         ("declick", "mouth-click / de-crackle removal"),
         ("plosives", "plosive ducking"),
         ("deess", "de-essing"),
+        ("resonance", "dynamic resonance / harshness suppression"),
         ("gate", "crosstalk gate + level match"),
         ("breath", "breath ducking"),
         ("fillers", "filler-word removal"),
         ("tighten", "pause tightening"),
         ("leveler", "slow segment-loudness leveling"),
+        ("exciter", "harmonic presence exciter"),
         ("master", "compression + loudness normalization"),
     ]:
         toggles.add_argument(f"--no-{flag}", action="store_true", help=f"disable {help_text}")
@@ -107,6 +117,10 @@ def _validate(args: argparse.Namespace) -> None:
         raise SystemExit("error: --lufs must be between -40 and -5 (e.g. -16 podcast, -14 streaming)")
     if not re.fullmatch(r"\d+k?", args.bitrate):
         raise SystemExit("error: --bitrate must look like '192k' or '256000'")
+    for flag, path in (("--intro-sound", args.intro_sound),
+                       ("--outro-sound", args.outro_sound)):
+        if path is not None and not path.exists():
+            raise SystemExit(f"error: {flag} file not found: {path}")
 
 
 def _setup_logging(mode: str, verbose: bool, reporter: progress.Reporter) -> None:
@@ -132,6 +146,19 @@ def _setup_logging(mode: str, verbose: bool, reporter: progress.Reporter) -> Non
         logging.basicConfig(level=level, format="%(levelname)-7s %(message)s")
 
 
+def _effective_bookends(args: argparse.Namespace) -> tuple[Path | None, Path | None]:
+    """Bookends after the --nocut policy. An intro shifts the entire timeline,
+    defeating --nocut's sample-alignment purpose, so both are ignored there."""
+    if not args.nocut:
+        return args.intro_sound, args.outro_sound
+    ignored = [name for name, given in (("--intro-sound", args.intro_sound),
+                                        ("--outro-sound", args.outro_sound)) if given]
+    if ignored:
+        log.warning("%s ignored because --nocut keeps the original timeline",
+                    ", ".join(ignored))
+    return None, None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     mode = progress.resolve_mode(args.progress, args.verbose)
@@ -150,10 +177,13 @@ def main(argv: list[str] | None = None) -> int:
             log.warning("%s ignored because --nocut keeps the original timeline",
                         ", ".join(ignored))
 
+    intro_sound, outro_sound = _effective_bookends(args)
+
     cfg = Config(
         keep_stems=args.keep_stems,
         nocut=args.nocut,
         strength=args.strength,
+        dropouts=not args.no_dropouts,
         declip=not args.no_declip,
         dehum=not args.no_dehum,
         align=not args.no_align,
@@ -163,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         declick=not args.no_declick,
         plosives=not args.no_plosives,
         deess=not args.no_deess,
+        resonance=not args.no_resonance,
         gate=not args.no_gate,
         breath=not args.no_breath,
         fillers=not args.no_fillers,
@@ -174,6 +205,9 @@ def main(argv: list[str] | None = None) -> int:
         max_pause_s=args.max_pause,
         target_pause_s=args.target_pause,
         master=not args.no_master,
+        exciter=not args.no_exciter,
+        intro_sound=intro_sound,
+        outro_sound=outro_sound,
         lufs=args.lufs,
         out_sr=args.out_sr,
         lossy_bitrate=args.bitrate,

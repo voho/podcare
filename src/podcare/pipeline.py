@@ -13,8 +13,8 @@ from .config import Config
 from .progress import Reporter
 from .session import Session, Track
 from .stages import (align, breath, declick, deess, dehum, denoise, dereverb,
-                     fillers, gate, leveler, master, mixdown, plosives, repair,
-                     silence, tonebalance)
+                     dropouts, fillers, gate, leveler, master, mixdown,
+                     plosives, repair, resonance, silence, tonebalance)
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +35,10 @@ class Stage:
 
 
 STAGES: list[Stage] = [
+    Stage("dropouts", lambda c: c.s > 0 and c.dropouts, "track",
+          dropouts.restore_dropouts_track,
+          lambda c: f"fill 3-{c.dropout_max_gap_ms():.0f}ms packet-loss gaps "
+                    f"(two-sided LPC, speech-gated)"),
     Stage("repair", lambda c: c.s > 0 and (c.declip or c.hpf_hz > 0), "track", repair.repair_track,
           lambda c: f"declick+declip={'on' if c.declip else 'off'} hpf={c.hpf_hz:.0f}Hz"),
     Stage("dehum", lambda c: c.s > 0 and c.dehum, "track", dehum.dehum_track,
@@ -61,6 +65,10 @@ STAGES: list[Stage] = [
     Stage("deess", lambda c: c.s > 0 and c.deess, "track", deess.deess_track,
           lambda c: f"band={c.deess_lo_hz:.0f}-{c.deess_hi_hz:.0f}Hz ratio>{c.deess_ratio():.2f} "
                     f"max={c.deess_max_db():.1f}dB"),
+    Stage("resonance", lambda c: c.s > 0 and c.resonance, "track",
+          resonance.resonance_track,
+          lambda c: f"dynamic notching 800-9000Hz margin={c.resonance_margin_db():.1f}dB "
+                    f"max-cut={c.resonance_max_cut_db():.1f}dB"),
     Stage("gate", lambda c: c.s > 0 and c.gate, "track", gate.gate_track,
           lambda c: f"depth={c.gate_depth_db():.1f}dB level={c.level_target_dbfs:.0f}dBFS"),
     Stage("breath", lambda c: c.s > 0 and c.breath, "track", breath.breath_track,
@@ -169,7 +177,9 @@ def run(inputs: list[Path], out_path: Path, cfg: Config,
         if cfg.master:
             comp = (f"mb-comp(3-band) {cfg.comp_ratio():.1f}:1@{cfg.comp_threshold():.2f} "
                     if cfg.compress and cfg.s > 0 else "comp=off ")
-            params = (f"{comp}loudnorm I={cfg.lufs:.0f}LUFS TP={cfg.true_peak_db:.1f}dB "
+            exc = (f"exciter={cfg.exciter_amount():.1f} "
+                   if cfg.exciter and cfg.s > 0 else "exciter=off ")
+            params = (f"{comp}{exc}loudnorm I={cfg.lufs:.0f}LUFS TP={cfg.true_peak_db:.1f}dB "
                       f"+TP-limiter -> {cfg.out_sr}Hz")
         else:
             params = f"raw mix, encode -> {cfg.out_sr}Hz"
