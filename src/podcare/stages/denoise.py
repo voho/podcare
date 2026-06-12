@@ -36,6 +36,39 @@ def _load_deepfilter() -> tuple:
     return _df_runtime
 
 
+def unload_deepfilter() -> None:
+    """Release the cached DeepFilterNet model and PyTorch's allocator cache.
+
+    The model is loaded once and memoized in `_df_runtime`; nothing after the
+    denoise stage uses it, yet it (plus PyTorch's cached allocations) would
+    otherwise stay resident through the memory-hungry dereverb/WPE stage. The
+    pipeline calls this at the denoise->dereverb boundary to free that RAM
+    before WPE allocates its large per-chunk transients.
+    """
+    global _df_runtime
+    if _df_runtime is None:
+        return
+    _df_runtime = None  # drop the only reference to (enhance, model, df_state)
+
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+    except ImportError:
+        return
+    # Return PyTorch's cached blocks to the OS. Guard each backend: the call
+    # raises if that backend isn't built/available on this platform.
+    for backend in (getattr(torch, "mps", None), getattr(torch, "cuda", None)):
+        empty = getattr(backend, "empty_cache", None)
+        if empty is None:
+            continue
+        try:
+            empty()
+        except Exception:  # noqa: BLE001 — best-effort cache release
+            pass
+
+
 def denoise_track(track: Track, cfg: Config) -> Track:
     import torch
 

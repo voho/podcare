@@ -183,6 +183,11 @@ def main(argv: list[str] | None = None) -> int:
     except (FfmpegError, FileNotFoundError) as exc:
         log.error("%s", exc)
         return 2
+    except KeyboardInterrupt:
+        # The live display is already torn down by progress.use()'s finally; just
+        # report a clean stop instead of dumping a traceback. 130 = 128 + SIGINT.
+        log.warning("interrupted — stopping")
+        return 130
     summary = f"{{m}} {args.output}  ({in_dur / 60:.1f} min in {{a}} {out_dur / 60:.1f} min out)"
     try:
         print(summary.format(m="✓", a="→"))

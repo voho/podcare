@@ -58,7 +58,11 @@ class Config:
 
     # Dereverb (WPE linear prediction; complements DeepFilterNet)
     dereverb: bool = True
-    dereverb_chunk_s: float = 30.0
+    # 15s chunks keep WPE's per-chunk complex128 transients (~hundreds of MB)
+    # small so they don't contend for RAM right after the neural denoiser; the
+    # 1s crossfade overlap hides chunk seams and a static room needs no more
+    # context than this.
+    dereverb_chunk_s: float = 15.0
     wpe_delay: int = 3
 
     # Tonal-balance EQ (per-track LTAS match to a broadcast voice curve)
@@ -152,7 +156,10 @@ class Config:
         return int(round(_lerp(6, 16, self.s)))
 
     def wpe_iterations(self) -> int:
-        return int(round(_lerp(1, 7, self.s)))
+        # WPE's EM converges within ~3 iterations for speech (nara-wpe's own
+        # examples use 2-5); a higher ceiling mostly burns time and allocates
+        # more large transients for negligible extra reverb suppression.
+        return int(round(_lerp(1, 3, self.s)))
 
     # Plosives: 0 flags ~nothing (very high burst threshold, shallow duck); 1
     # catches the most and ducks hardest. Target stays below burst at all s.

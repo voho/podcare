@@ -150,6 +150,11 @@ def run(inputs: list[Path], out_path: Path, cfg: Config,
             reporter.end_stage(stage.name, dt)
             if cfg.keep_stems is not None:
                 _dump_stems(session, cfg, idx, stage.name)
+            # Free the DeepFilterNet model + PyTorch cache before the
+            # memory-hungry dereverb/WPE stage that immediately follows denoise,
+            # so WPE's large per-chunk transients don't contend for RAM.
+            if stage.name == "denoise":
+                denoise.unload_deepfilter()
 
         if len(session.tracks) != 1:
             raise RuntimeError(f"expected one track after mixdown, got {len(session.tracks)}")

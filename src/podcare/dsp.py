@@ -2,15 +2,32 @@
 
 from __future__ import annotations
 
+import logging
 import math
+import time
 
 import numpy as np
 
 from .progress import active
 
+log = logging.getLogger(__name__)
+
 
 def db_to_lin(db: float) -> float:
     return float(10.0 ** (db / 20.0))
+
+
+def _peak_rss_mb() -> float:
+    """Process peak resident set size in MB (high-watermark, no dependency).
+
+    ru_maxrss is bytes on macOS/BSD but kibibytes on Linux; normalise both.
+    """
+    import resource
+    import sys
+
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    scale = 1.0 if sys.platform == "darwin" else 1024.0
+    return rss * scale / (1024.0 * 1024.0)
 
 
 def block_rms(audio: np.ndarray, hop: int) -> np.ndarray:
@@ -133,11 +150,22 @@ def process_chunked(audio: np.ndarray, sr: int, fn, *, chunk_s: float,
         out = np.zeros(len(audio), dtype=np.float64)
         weight = np.zeros(len(audio), dtype=np.float64)
         start = 0
+        n_done = 0
+        slowest = 0.0
         while start < len(audio):
             end = min(len(audio), start + chunk + overlap)
+            t_chunk = time.perf_counter()
             piece = fn(audio[start:end]).astype(np.float64)
+            dt_chunk = time.perf_counter() - t_chunk
             if len(piece) != end - start:
                 raise ValueError(f"chunk fn changed length: {end - start} -> {len(piece)}")
+            n_done += 1
+            slowest = max(slowest, dt_chunk)
+            # Per-chunk timing + peak RSS: distinguishes "slow because compute"
+            # from "slow because memory pressure" when a stage drags (DEBUG so it
+            # only surfaces when explicitly wanted; the summary below is at INFO).
+            log.debug("%s chunk %d/%d: %.2fs, peak RSS %.0f MB",
+                      label or "chunk", n_done, n_chunks, dt_chunk, _peak_rss_mb())
             w = np.ones(len(piece))
             if start > 0:
                 n = min(overlap, len(piece))
@@ -151,6 +179,9 @@ def process_chunked(audio: np.ndarray, sr: int, fn, *, chunk_s: float,
             if end == len(audio):
                 break
             start += chunk
+        if label:
+            log.info("%s — %d chunks, slowest %.2fs, peak RSS %.0f MB",
+                     label, n_done, slowest, _peak_rss_mb())
         return (out / np.maximum(weight, 1e-9)).astype(np.float32)
     finally:
         reporter.end_sub()
