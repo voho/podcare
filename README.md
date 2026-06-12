@@ -352,18 +352,22 @@ distant or boxy.
 
 **How it works.** **WPE** (Weighted Prediction Error) linear-prediction dereverb:
 it estimates a per-frequency filter that predicts the reverb tail from the recent
-past and subtracts it. Complementary to the neural denoiser. Run in **30 s chunks
-with crossfade**.
+past and subtracts it. Complementary to the neural denoiser. Run in **15 s chunks
+with crossfade** — short chunks keep WPE's large per-chunk transients from
+contending for RAM right after the neural denoiser, and a static room needs no
+more context than this.
 
-**Strength.** Lengthens the prediction filter and adds iterations.
+**Strength.** Lengthens the prediction filter and adds iterations. The iteration
+ceiling is 3: WPE's estimate converges within ~3 passes for speech (nara-wpe's
+own examples use 2–5); more passes burn time for negligible extra suppression.
 
 | Parameter | Value | Controlled by |
 |---|---|---|
 | Stage enabled | on | CLI `--no-dereverb` |
 | WPE taps (filter length) | `6 → 16` (14 @ 0.8) | **Strength** |
-| WPE iterations | `1 → 7` (6 @ 0.8) | **Strength** |
+| WPE iterations | `1 → 3` (3 @ 0.8) | **Strength** |
 | WPE prediction delay | 3 | `Config.wpe_delay` |
-| Chunk length | 30 s | `Config.dereverb_chunk_s` |
+| Chunk length | 15 s | `Config.dereverb_chunk_s` |
 
 ---
 
@@ -755,10 +759,13 @@ no-op at strength 0); none need a new heavyweight dependency.
   leveler, tighten, align); **DeepFilterNet/torch**, **nara-wpe**, and
   **faster-whisper + WhisperX** for the ML/heavy stages; **soxr** for the single
   final resample.
-- **Robustness by design.** Heavy spectral stages (denoise, dereverb, plosives,
-  de-click) are chunked so memory stays bounded on multi-hour episodes; the
-  optional ML filler pass degrades to a no-op (with a warning) rather than aborting
-  a render; silent programs and bad CLI inputs fail fast and cleanly.
+- **Robustness by design.** Heavy spectral stages (denoise, dereverb, resonance,
+  plosives, de-click) are chunked so memory stays bounded on multi-hour episodes,
+  and the neural denoiser's model is freed at the denoise→dereverb boundary so it
+  never contends with WPE's large working set; the optional ML filler pass
+  degrades to a no-op (with a warning) rather than aborting a render; silent
+  programs, bad CLI inputs, and missing intro/outro files fail fast and cleanly;
+  Ctrl+C exits with a clean "interrupted" line instead of a traceback.
 - Tests use synthetic fixtures with known ground truth (recover a known offset,
   reduce injected sibilance/hum/clicks, even out a loudness drift, hold the
   true-peak ceiling, final loudness within ±1.5 LU of target) plus the
