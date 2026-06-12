@@ -1,6 +1,16 @@
 # Roadmap stages 1–3 + intro/outro bookends — design
 
-**Date:** 2026-06-12 · **Status:** approved (user, 2026-06-12)
+**Date:** 2026-06-12 · **Status:** implemented (2026-06-12)
+
+> **Implementation deviations** (each empirically validated during review, with
+> rationale in code comments): dropouts uses LPC order **96** / **80 ms**
+> context (not ~32/~30 ms — zero-crossing phase resolution + clean context
+> after boundary trimming) and an inline speech-level gate (not
+> `speech_threshold`, whose noise-floor term mis-fires on uniform-level
+> signals); the exciter uses **freq=4000, ceil=16000** (not ~7.4 kHz — aexciter
+> derives harmonics FROM the band above `freq`, so 4–8 kHz speech content
+> lands at 8–16 kHz); bookend crossfades clamp **per join**, and joined output
+> gets a safety limiter pass in the no-master path too.
 
 ## Context
 
