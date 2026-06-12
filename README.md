@@ -126,6 +126,8 @@ what `--strength` would have chosen.
 | `--out-sr HZ` | `44100` | Output sample rate (validated `8000 … 192000`). Resampling happens exactly once, at the end. |
 | `--bitrate RATE` | `192k` | Bitrate for lossy outputs (MP3/AAC). Ignored for WAV/FLAC. |
 | `--keep-stems DIR` | off | Write each stage's intermediate audio **and the final master** into `DIR` as numbered files. |
+| `--intro-sound AUDIO` | off | Sound placed before the finished program (anything ffmpeg reads; downmixed to mono, loudness-matched to the output target, joined with a 100 ms equal-power crossfade). Ignored with `--nocut`. |
+| `--outro-sound AUDIO` | off | Sound placed after the finished program (same treatment as `--intro-sound`). Ignored with `--nocut`. |
 
 ### Stage toggles
 
@@ -133,6 +135,7 @@ Each switch disables one stage; everything else still runs.
 
 | Flag | Disables |
 |---|---|
+| `--no-dropouts` | Dropout / short-gap restoration |
 | `--no-declip` | Distortion repair (declick + declip + rumble high-pass) |
 | `--no-dehum` | Mains-hum (50/60 Hz) harmonic removal |
 | `--no-align` | Inter-track time-offset and polarity correction |
@@ -142,11 +145,13 @@ Each switch disables one stage; everything else still runs.
 | `--no-declick` | Mouth-click / de-crackle removal |
 | `--no-plosives` | Plosive ("p-pop") ducking |
 | `--no-deess` | De-essing (sibilance control) |
+| `--no-resonance` | Dynamic resonance / harshness suppression |
 | `--no-gate` | Crosstalk/room gate **and** per-track level matching |
 | `--no-breath` | Breath ducking |
 | `--no-fillers` | Filler-word removal |
 | `--no-tighten` | Pause tightening / dead-air trimming |
 | `--no-leveler` | Slow segment-loudness leveling |
+| `--no-exciter` | Harmonic presence exciter |
 | `--no-master` | Multiband compression + loudness normalization + limiting |
 
 ---
@@ -161,17 +166,17 @@ post-sum edits are on the single mono program, so the tracks can never drift out
 of sync.
 
 ```
-            ┌────────────────────────────── per track ───────────────────────────────┐
-decode ─▶ repair ─ dehum ─ align ─ denoise ─ dereverb ─ tonebalance ─ declick ─ plosives ─┐
- (load    (declick (mains  (offset (DFN3)    (WPE       (LTAS->voice  (mouth   (p-pop      │
-  48k)     declip   hum     + pol.            tail)      curve EQ)     clicks)  ducking)    │
-          HPF)      notch)  fix)                                                            ▼
-        ┌──────────────────────────────────────────────────────── deess ─ gate ─ breath ─ fillers
-        │                                                         (sibilance (level (duck   (per-mic
-        ▼                                                          control)  match) inhale) ASR cuts)
+            ┌──────────────────────────────────── per track ─────────────────────────────────────┐
+decode ─▶ dropouts ─ repair ─ dehum ─ align ─ denoise ─ dereverb ─ tonebalance ─ declick ─ plosives ─┐
+ (load    (LPC gap  (declick (mains  (offset (DFN3)    (WPE       (LTAS->voice  (mouth   (p-pop      │
+  48k)     fill)     declip   hum     + pol.            tail)      curve EQ)     clicks)  ducking)    │
+                     HPF)     notch)  fix)                                                            ▼
+        ┌───────────────────────────── deess ─ resonance ─ gate ─ breath ─ fillers
+        │                              (sibilance (dynamic    (level (duck   (per-mic
+        ▼                               control)   notching)   match) inhale) ASR cuts)
      mixdown ─▶ tighten ─▶ leveler ─▶ master ──────────────────────▶ encode
-    (sum→mono) (shorten   (slow      (mb-comp + loudnorm            (44.1k/16
-                dead air)  loudness   + TP-limiter)                  + dither)
+    (sum→mono) (shorten   (slow      (mb-comp + exciter +           (44.1k/16
+                dead air)  loudness   loudnorm + TP-limiter)         + dither)
                           ride)
 ```
 
@@ -206,7 +211,44 @@ mono. A file that decodes to zero samples is rejected immediately.
 
 ---
 
-### 1. Repair — `--no-declip` *(per track)*
+### 1. Dropout restoration — `--no-dropouts` *(per track)*
+
+**Fixes.** Brief signal holes — 3–50 ms of missing audio on remote-guest tracks
+(VoIP, double-enders over flaky links) where packets were lost, audible as tiny
+stutters.
+
+**How it works.** Each hole is refilled by linear prediction: the speech is
+extrapolated forward from the audio before the gap and backward from the audio
+after it (using Levinson-Durbin LPC on an 80 ms context window), and the two
+estimates are crossfade-blended across the gap with equal-power cosine weights,
+feathered into the real audio at the seams.
+
+**Strict caps keep it honest.** Only gaps up to a strength-scaled maximum (0 ms
+at strength 0 → 50 ms at 1) are filled; only when the surrounding context is
+speech-active (a quiet moment inside a real pause is not a dropout); and no more
+than ~1.2 s per minute — beyond that the track is corrupt, not packet-lossy,
+and filling more would fabricate content.
+
+**Runs first** so every later stage (including declick and denoise) sees
+gap-free audio.
+
+**Strength.** Scales the longest fillable gap: `0 → 50 ms` (40 ms @ 0.8).
+At strength 0 the maximum gap is 0 ms — a true no-op (and the stage is
+skipped).
+
+| Parameter | Value | Controlled by |
+|---|---|---|
+| Stage enabled | on | CLI `--no-dropouts` |
+| Max fillable gap | `0 → 50 ms` (40 ms @ 0.8) | **Strength** |
+| Fill budget | ~1.2 s per minute | Hardcoded |
+| Min gap | 3 ms (1 RMS block) | Hardcoded |
+| LPC context | 80 ms (both sides) | Hardcoded |
+| LPC order | 96 | Hardcoded |
+| Seam crossfade | 2 ms | Hardcoded |
+
+---
+
+### 2. Repair — `--no-declip` *(per track)*
 
 **Fixes.** Clicks, glitches, hard clipping (recorded too hot), subsonic rumble.
 
@@ -225,7 +267,7 @@ fundamental. Distortion repaired here can't be denoised away later, so it's firs
 
 ---
 
-### 2. De-hum — `--no-dehum` *(per track)*
+### 3. De-hum — `--no-dehum` *(per track)*
 
 **Fixes.** Steady 50/60 Hz mains hum and its harmonics (100/120, 150/180, …) and
 ground-loop/USB buzz — one of the most instantly-noticeable amateur tells, which
@@ -254,7 +296,7 @@ detection margin (plus the stage is skipped).
 
 ---
 
-### 3. Align + polarity — `--no-align` *(session-level, ≥ 2 tracks)*
+### 4. Align + polarity — `--no-align` *(session-level, ≥ 2 tracks)*
 
 **Fixes.** Recorders started at different instants (offset tracks smear crosstalk
 into echo) and miswired/inverted mics (phase cancellation when summed).
@@ -278,7 +320,7 @@ Tracks are then zero-padded to equal length.
 
 ---
 
-### 4. Denoise — `--no-denoise` *(per track)*
+### 5. Denoise — `--no-denoise` *(per track)*
 
 **Fixes.** Broadband noise — room tone, hiss, fans, distant traffic, breath noise.
 
@@ -303,7 +345,7 @@ Weights ship inside the package (no download). Processed in **60 s chunks with a
 
 ---
 
-### 5. Dereverb — `--no-dereverb` *(per track, WPE)*
+### 6. Dereverb — `--no-dereverb` *(per track, WPE)*
 
 **Fixes.** The room — the late-reverberation "tail" that makes voices sound
 distant or boxy.
@@ -325,7 +367,7 @@ with crossfade**.
 
 ---
 
-### 6. Tonal balance — `--no-tonebalance` *(per track)*
+### 7. Tonal balance — `--no-tonebalance` *(per track)*
 
 **Fixes.** The chain has no spectral shaping otherwise, so a dull lavalier and a
 bright condenser stay timbrally mismatched after all the cleanup; gross tilt,
@@ -355,7 +397,7 @@ subtle even at full strength.
 
 ---
 
-### 7. Mouth-click / de-crackle — `--no-declick` *(per track)*
+### 8. Mouth-click / de-crackle — `--no-declick` *(per track)*
 
 **Fixes.** Wet mouth clicks, lip smacks, tongue clicks and saliva crackle that
 `adeclick` (vinyl/digital impulses) and the neural denoiser leave intact — and
@@ -383,7 +425,7 @@ Huge at strength 0 (nothing triggers).
 
 ---
 
-### 8. Plosive ducking — `--no-plosives` *(per track)*
+### 9. Plosive ducking — `--no-plosives` *(per track)*
 
 **Fixes.** "P"/"B" pops — the burst of low-frequency energy a plosive blasts into
 the mic.
@@ -406,7 +448,7 @@ feathered ±1 frame.
 
 ---
 
-### 9. De-ess — `--no-deess` *(per track)*
+### 10. De-ess — `--no-deess` *(per track)*
 
 **Fixes.** Harsh "S"/"SH"/"T" sibilance.
 
@@ -430,7 +472,37 @@ engages correctly on a quiet mic.
 
 ---
 
-### 10. Gate + level match — `--no-gate` *(per track, before mixdown)*
+### 11. Resonance suppression — `--no-resonance` *(per track)*
+
+**Fixes.** Resonant peaks that come and go with the voice — ringy room modes,
+nasal honk, 2–5 kHz harshness spikes — which static tonal-balance EQ cannot
+catch because they are dynamic. A major cause of earbud fatigue on dense podcast
+mixes.
+
+**How it works.** A "Soothe-lite" dynamic resonance tamer. Per STFT frame, a
+median filter across frequency bins estimates the broad spectral envelope (~420 Hz
+window at 48 kHz); any bin that protrudes more than a margin above its own
+envelope is pulled back by the excess, capped at a maximum cut, with asymmetric
+one-pole attack/release smoothing so notches fade in fast and out gently — cut
+engages in ~5 ms, releases over ~80 ms. Cut-only, and only between 800 Hz and
+9 kHz (leaving the voice fundamental and the air region untouched).
+
+**Strength.** Lowers the detection margin (more sensitive) and raises the
+maximum cut. At strength 0 the cut cap is 0 dB — a bitwise no-op (and the
+stage is skipped).
+
+| Parameter | Value | Controlled by |
+|---|---|---|
+| Stage enabled | on | CLI `--no-resonance` |
+| Detection margin | `18 → 6 dB` (8.4 dB @ 0.8) | **Strength** |
+| Max cut | `0 → 10 dB` (8 dB @ 0.8) | **Strength** |
+| Active band | 800–9000 Hz | Hardcoded |
+| Attack / release | ~5 ms / ~80 ms | Hardcoded |
+| Spectral median window | ~420 Hz (~9 bins @ 48k/1024) | Hardcoded |
+
+---
+
+### 12. Gate + level match — `--no-gate` *(per track, before mixdown)*
 
 **Fixes.** Crosstalk/bleed and room tone between phrases; mismatched speaker
 levels.
@@ -452,7 +524,7 @@ a loud host arrive balanced.
 
 ---
 
-### 11. Breath control — `--no-breath` *(per track)*
+### 13. Breath control — `--no-breath` *(per track)*
 
 **Fixes.** Audible inhale breaths between phrases. The gate only acts below its
 threshold and breaths usually sit *above* it, so they survive; after compression
@@ -477,7 +549,7 @@ confirmed by spectral shape (mid-band, unvoiced). Flagged spans are **ducked**
 
 ---
 
-### 12. Filler-word removal — `--no-fillers`, `--filler-sensitivity`, `--whisper-model`, `--language` *(session-level, per-track detection, before mixdown)*
+### 14. Filler-word removal — `--no-fillers`, `--filler-sensitivity`, `--whisper-model`, `--language` *(session-level, per-track detection, before mixdown)*
 
 **Fixes.** Non-lexical fillers — "um", "uh", "ehm", "er", "hmm", "mm", … — located
 by transcription, not by listening for a sound.
@@ -508,7 +580,7 @@ sensitivity follows strength conservatively (`0.7 × strength`).
 
 ---
 
-### 13. Mixdown *(session-level)*
+### 15. Mixdown *(session-level)*
 
 **Fixes.** Many cleaned mics → one program; sum-clipping.
 
@@ -525,7 +597,7 @@ is exactly one timeline.
 
 ---
 
-### 14. Pause tightening — `--no-tighten`, `--max-pause`, `--target-pause` *(mono program)*
+### 16. Pause tightening — `--no-tighten`, `--max-pause`, `--target-pause` *(mono program)*
 
 **Fixes.** Dead air — pacing.
 
@@ -546,7 +618,7 @@ post-gate noise floor) so breaths, beats and quiet reactions survive.
 
 ---
 
-### 15. Segment loudness leveler — `--no-leveler` *(mono program)*
+### 17. Segment loudness leveler — `--no-leveler` *(mono program)*
 
 **Fixes.** Minutes-scale loudness drift that the rest of the chain ignores: a guest
 who fades over a segment, a host who leans back, the gap between an intro and a
@@ -572,27 +644,34 @@ mono bus before the master compressor so it sees consistent macro-dynamics.
 
 ---
 
-### 16. Master — `--no-master`, `--lufs`, `--bitrate`
+### 18. Master — `--no-master`, `--lufs`, `--bitrate`
 
 **Fixes.** Band-specific dynamics, inconsistent loudness, and inter-sample peaks —
 the finishing chain.
 
-**How it works.** Three steps. **Multiband compression** splits the bus into three
+**How it works.** Four steps. **Multiband compression** splits the bus into three
 phase-coherent bands (`acrossover`, LR4 at 250 Hz / 4 kHz) and compresses each
 independently (`acompressor` per band) so a boomy low-mid or a sibilant peak no
 longer ducks the whole program — denser, more consistent loudness than a single
-broadband compressor (off at `--strength 0`, where every band is 1:1). Then
-**two-pass EBU R128 loudness normalization** (`loudnorm`, always on): the first
-pass measures, the second applies a **linear** gain to hit exactly the target LUFS.
-Finally a **brickwall true-peak limiter** (`alimiter`, `level=false` so it never
-fights the loudness target) catches the inter-sample / codec overs loudnorm's
-single linear gain can leave, guaranteeing the delivered file never clips a
-consumer DAC. A silent/near-silent program (below loudnorm's −70 LUFS gate) skips
-normalization rather than erroring.
+broadband compressor (off at `--strength 0`, where every band is 1:1). Then a
+**harmonic exciter** (`--no-exciter`) synthesizes a touch of new harmonics from the
+4–8 kHz consonant/sibilance band (ffmpeg `aexciter`, harmonics land at 8–16 kHz)
+to restore the "air" heavy denoise/dereverb removes and to cut through tiny
+speakers — rather than boosting (possibly noisy) existing highs. Runs before the
+loudness measurement so the added energy is counted in the loudness math. Strength
+maps `amount 0 → 2.5`; deliberately conservative. Then **two-pass EBU R128
+loudness normalization** (`loudnorm`, always on): the first pass measures, the
+second applies a **linear** gain to hit exactly the target LUFS. Finally a
+**brickwall true-peak limiter** (`alimiter`, `level=false` so it never fights the
+loudness target) catches the inter-sample / codec overs loudnorm's single linear
+gain can leave, guaranteeing the delivered file never clips a consumer DAC. A
+silent/near-silent program (below loudnorm's −70 LUFS gate) skips normalization
+rather than erroring.
 
-**Strength.** Firms up the per-band compression (higher ratios, lower thresholds);
-loudness, true-peak target, and the limiter are absolute delivery settings, not
-strength-scaled (the limiter runs at every strength, even 0).
+**Strength.** Firms up the per-band compression (higher ratios, lower thresholds)
+and raises the exciter amount; loudness, true-peak target, and the limiter are
+absolute delivery settings, not strength-scaled (the limiter runs at every
+strength, even 0).
 
 | Parameter | Value | Controlled by |
 |---|---|---|
@@ -600,6 +679,9 @@ strength-scaled (the limiter runs at every strength, even 0).
 | Multiband compression | 3-band LR4 @ 250 Hz / 4 kHz (off at strength 0) | `Config.compress` |
 | Mid-band ratio | `1.0 → 3.5` (3.0 @ 0.8); low ×1.1, high ×0.8 | **Strength** |
 | Mid-band threshold | `0.30 → 0.10` amplitude (0.14 @ 0.8) | **Strength** |
+| Exciter enabled | on | CLI `--no-exciter` |
+| Exciter source band | 4–8 kHz (freq=4000, ceil=16000) | Hardcoded |
+| Exciter amount | `0 → 2.5` (2.0 @ 0.8) | **Strength** |
 | Integrated loudness target | −16 LUFS | CLI `--lufs` |
 | True-peak ceiling | −1.5 dBTP | `Config.true_peak_db` |
 | Normalization | two-pass, linear | Hardcoded |
@@ -607,7 +689,7 @@ strength-scaled (the limiter runs at every strength, even 0).
 
 ---
 
-### 17. Encode + resample
+### 19. Encode + resample
 
 **Fixes.** Delivery format and the single, clean rate conversion.
 
@@ -628,6 +710,19 @@ target, and size.
 
 ---
 
+## Intro / outro
+
+`--intro-sound` and `--outro-sound` attach a sting or theme around the finished
+program **after all processing**: each file (anything ffmpeg reads; downmixed to
+mono) is loudness-normalized to the same target as the program — so a hot music
+sting can't blast ears relative to speech — then joined with a 100 ms equal-power
+crossfade (clamped to half the bookend's length so a short sting is never consumed
+by its own fade). A final true-peak limiter pass runs over the joins to handle any
+momentary overlap peaks from the crossfade. Not available with `--nocut`, which
+promises a sample-aligned timeline.
+
+---
+
 ## Roadmap — remaining proposed stages
 
 The chain below already covers the full restoration → enhancement → master path.
@@ -637,14 +732,13 @@ no-op at strength 0); none need a new heavyweight dependency.
 
 > ✅ **Shipped from the original roadmap:** tonal-balance LTAS EQ, true-peak
 > limiter, segment loudness leveler, de-hum / de-buzz, multiband bus compressor,
-> breath control, and mouth-click / de-crackle removal are all implemented above.
+> breath control, mouth-click / de-crackle removal, dynamic resonance / harshness
+> suppression, harmonic presence exciter, and dropout / short-gap restoration are
+> all implemented above.
 
 | # | Proposed stage | Tier | Where | What it adds |
 |---|---|---|---|---|
-| 1 | **Dynamic resonance / harshness suppression** | high-value | per track, around de-ess | "Soothe-style" adaptive STFT notching of transient resonant peaks (ringy room modes, nasal honk, 2–5 kHz spikes) that the static tonal-balance EQ can't catch because they come and go with the voice — a major cause of earbud fatigue. The trickiest to tune transparently. |
-| 2 | **Harmonic presence exciter** | nice-to-have | inside master, late | A touch of high-band saturation (ffmpeg `aexciter`) to restore "air" lost to heavy denoise/dereverb and cut through tiny speakers — synthesizes new harmonics rather than boosting (possibly noisy) existing highs. Easy to overdo; conservative ceiling. |
-| 3 | **Dropout / short-gap restoration** | nice-to-have | per track, early | LPC/interpolation fill of brief (<~50 ms) signal dropouts from remote-guest packet loss, so remote guests sound locally recorded. Strict gap caps so it never fabricates real content. |
-| 4 | **Music-bed ducking + stereo delivery** | skip (unless requested) | I/O contract change | Sidechain-duck an optional intro/outro music bed under speech, and offer stereo (artifact-free dual-mono) output. Format/feature work, not a voice-fidelity fix — it would expand the "mics-in, one-mono-file-out" contract. |
+| 1 | **Music-bed ducking + stereo delivery** | skip (unless requested) | I/O contract change | Sidechain-duck an optional intro/outro music bed under speech, and offer stereo (artifact-free dual-mono) output. Format/feature work, not a voice-fidelity fix — it would expand the "mics-in, one-mono-file-out" contract. |
 
 ---
 
