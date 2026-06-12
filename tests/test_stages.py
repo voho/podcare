@@ -1,8 +1,10 @@
 import numpy as np
 import pytest
+import soundfile as sf
 
 from podcare.config import Config
 from podcare.session import Session, Track
+from podcare.stages.master import master_and_encode
 from podcare.stages.align import align_session
 from podcare.stages.deess import deess_track
 from podcare.stages.dereverb import dereverb_track
@@ -568,3 +570,33 @@ class TestResonance:
         audio = speech_like(4, seed=8)
         out = resonance_track(Track("x", audio), Config(strength=0.0)).audio
         assert np.array_equal(out, audio)
+
+
+class TestExciter:
+    def test_adds_high_band_energy(self, tmp_path):
+        from scipy.signal import butter, sosfilt
+        t = np.arange(SR * 4) / SR
+        dull = (0.3 * (np.sin(2 * np.pi * 400 * t)
+                       + 0.5 * np.sin(2 * np.pi * 2000 * t)
+                       + 0.25 * np.sin(2 * np.pi * 5000 * t))).astype(np.float32)
+        on_path, off_path = tmp_path / "on.wav", tmp_path / "off.wav"
+        master_and_encode(Track("x", dull), Config(out_sr=SR), on_path)
+        master_and_encode(Track("x", dull), Config(out_sr=SR, exciter=False), off_path)
+
+        def hf_rms(p):
+            a, _ = sf.read(p)
+            sos = butter(4, 7000, btype="highpass", fs=SR, output="sos")
+            return float(np.std(sosfilt(sos, a)))
+
+        assert hf_rms(on_path) > hf_rms(off_path) * 1.5, \
+            "exciter must add energy above 7 kHz"
+
+    def test_strength_zero_is_noop(self, tmp_path):
+        t = np.arange(SR * 2) / SR
+        sig = (0.2 * np.sin(2 * np.pi * 1000 * t)).astype(np.float32)
+        p_s0, p_off = tmp_path / "s0.wav", tmp_path / "off.wav"
+        master_and_encode(Track("x", sig), Config(out_sr=SR, strength=0.0), p_s0)
+        master_and_encode(Track("x", sig), Config(out_sr=SR, strength=0.0, exciter=False), p_off)
+        a, _ = sf.read(p_s0)
+        b, _ = sf.read(p_off)
+        assert np.array_equal(a, b), "strength=0 exciter must be a no-op"

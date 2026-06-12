@@ -118,7 +118,7 @@ class Config:
     true_peak_db: float = -1.5
     lossy_bitrate: str = "192k"  # MP3/AAC bitrate; ignored for WAV/FLAC
 
-    # Harmonic presence exciter (inside master; synthesizes "air" above ~7.4 kHz)
+    # Harmonic presence exciter (inside master; synthesizes "air" above ~8 kHz)
     exciter: bool = True
 
     # Intro/outro bookends — optional sounds assembled around the finished

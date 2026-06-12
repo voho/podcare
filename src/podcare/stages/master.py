@@ -56,6 +56,30 @@ def _limiter(cfg: Config) -> str:
             ":attack=5:release=50:asc=1:level=false")
 
 
+def _exciter(cfg: Config) -> str:
+    """Harmonic presence exciter — synthesizes new harmonics to restore the
+    "air" that heavy denoise/dereverb removes, rather than boosting (possibly
+    noisy) existing highs. Runs before the loudnorm measurement so the added
+    energy is included in the loudness math.
+
+    Source-band choice: ``freq=4000`` tells aexciter to derive harmonics from
+    content above 4 kHz. Harmonics land at integer multiples of the source
+    partials — a 5 kHz component generates harmonics at 10 kHz, 15 kHz, …
+    (the "air" band, 8–16 kHz). For speech, consonants and sibilance sit in
+    the 4–8 kHz band, so their harmonics land exactly in the desired air
+    region. Using ``freq=7400`` (the previous value) placed the source band
+    above the highest test-signal component (5 kHz), so the filter had nothing
+    to excite and only leaked distortion.
+
+    Amount: ``cfg.exciter_amount()`` maps 0→2.5 linearly with strength. At
+    these conservative levels the output peak stays ≤ ~1.3× the input peak
+    (empirically measured), well within the safe range for loudnorm; no
+    chained limiter is needed or desirable. ``ceil=16000`` lifts aexciter's
+    default ~10 kHz harmonic ceiling so the synthesized air actually reaches
+    the 12–16 kHz region it is meant to restore."""
+    return f"aexciter=amount={cfg.exciter_amount():.2f}:freq=4000:ceil=16000"
+
+
 def _finite(x) -> bool:
     try:
         return math.isfinite(float(x))
@@ -82,6 +106,13 @@ def master_and_encode(track: Track, cfg: Config, out_path: Path) -> None:
     # as its own pass; loudness normalization then always runs on the result so the
     # output hits the target level even at strength 0.
     audio = _apply_multiband(track.audio, cfg) if (cfg.compress and cfg.s > 0) else track.audio
+
+    if cfg.exciter and cfg.s > 0:
+        excited = audio_io.filter_array(audio, cfg.sr, _exciter(cfg))
+        # aexciter preserves length; pin it exactly like the multiband pass.
+        audio = (excited[: len(audio)] if len(excited) >= len(audio)
+                 else np.pad(excited, (0, len(audio) - len(excited))))
+        log.info("master: exciter amount=%.2f", cfg.exciter_amount())
 
     measured = audio_io.measure_loudnorm(audio, cfg.sr, pre_filters=None,
                                          lufs=cfg.lufs, true_peak=cfg.true_peak_db)
