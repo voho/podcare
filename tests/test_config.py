@@ -53,6 +53,9 @@ def test_df_atten_is_finite_and_continuous():
     lambda c: c.gate_depth_db(),
     lambda c: c.eff_filler_sensitivity(),
     lambda c: c.comp_ratio(),
+    lambda c: c.dropout_max_gap_ms(),
+    lambda c: c.resonance_max_cut_db(),
+    lambda c: c.exciter_amount(),
 ])
 def test_intensity_rises_with_strength(getter):
     low, high = getter(Config(strength=0.1)), getter(Config(strength=0.9))
@@ -64,6 +67,7 @@ def test_intensity_rises_with_strength(getter):
     lambda c: c.eff_max_pause(),        # shorter trigger = more cutting
     lambda c: c.eff_target_pause(),
     lambda c: c.comp_threshold(),
+    lambda c: c.resonance_margin_db(),   # lower margin = more sensitive
 ])
 def test_aggressiveness_inverse_params_fall_with_strength(getter):
     low, high = getter(Config(strength=0.1)), getter(Config(strength=0.9))
@@ -85,6 +89,14 @@ def test_explicit_overrides_beat_strength():
 def test_filler_sensitivity_follows_strength_when_unset():
     assert Config(strength=1.0).eff_filler_sensitivity() == pytest.approx(0.7)
     assert Config(strength=0.0).eff_filler_sensitivity() == 0.0
+
+
+def test_new_stage_helpers_are_identity_at_zero_strength():
+    c = Config(strength=0.0)
+    assert c.dropout_max_gap_ms() == 0.0
+    # max_cut=0 zeroes all reduction; margin_db is the sensitivity, not the gate
+    assert c.resonance_max_cut_db() == 0.0
+    assert c.exciter_amount() == 0.0
 
 
 def test_plosive_target_below_burst_threshold():

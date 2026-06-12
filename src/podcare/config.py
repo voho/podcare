@@ -44,6 +44,10 @@ class Config:
     declip: bool = True
     hpf_hz: float = 80.0
 
+    # Dropout / short-gap restoration (fills brief packet-loss holes via LPC;
+    # strength scales the longest gap it may fill — 0 ms at strength 0 = no-op)
+    dropouts: bool = True
+
     # De-hum (mains-hum harmonic notching; detection-gated, strength-scaled)
     dehum: bool = True
 
@@ -80,6 +84,9 @@ class Config:
     deess_lo_hz: float = 4500.0
     deess_hi_hz: float = 9500.0
 
+    # Dynamic resonance / harshness suppression ("Soothe-lite" STFT notching)
+    resonance: bool = True
+
     # Gate / level match (level target is absolute; gate depth follows strength)
     gate: bool = True
     level_target_dbfs: float = -20.0  # speech-active RMS target per track before mixdown
@@ -110,6 +117,16 @@ class Config:
     lufs: float = -16.0
     true_peak_db: float = -1.5
     lossy_bitrate: str = "192k"  # MP3/AAC bitrate; ignored for WAV/FLAC
+
+    # Harmonic presence exciter (inside master; synthesizes "air" above ~7.4 kHz)
+    exciter: bool = True
+
+    # Intro/outro bookends — optional sounds assembled around the finished
+    # program (loudness-matched, 100 ms equal-power crossfades). Assembly, not
+    # processing: used whenever set, not strength-scaled. The CLI ignores them
+    # under --nocut because an intro shifts the whole timeline.
+    intro_sound: Path | None = None
+    outro_sound: Path | None = None
 
     # ------------------------------------------------------------------ #
     # Strength → per-stage intensity. Defaults below are anchored so that
@@ -160,6 +177,26 @@ class Config:
         # examples use 2-5); a higher ceiling mostly burns time and allocates
         # more large transients for negligible extra reverb suppression.
         return int(round(_lerp(1, 3, self.s)))
+
+    # Dropouts: longest fillable gap. 0 ms at strength 0 (nothing qualifies ->
+    # identity); 50 ms at full strength — the README contract's honesty cap.
+    def dropout_max_gap_ms(self) -> float:
+        return _lerp(0.0, 50.0, self.s)
+
+    # Resonance: a bin must poke margin dB above its own spectral envelope to
+    # count as a resonance (lower = more sensitive); the cut is capped at
+    # max_cut.
+    def resonance_margin_db(self) -> float:
+        return _lerp(18.0, 6.0, self.s)
+
+    # Cap 0 at strength 0 → no reduction applied, making the math a no-op.
+    def resonance_max_cut_db(self) -> float:
+        return _lerp(0.0, 10.0, self.s)
+
+    # Exciter: ffmpeg aexciter `amount`. 0 adds no harmonics (identity);
+    # 2.5 ceiling is deliberately conservative ("easy to overdo").
+    def exciter_amount(self) -> float:
+        return _lerp(0.0, 2.5, self.s)
 
     # Plosives: 0 flags ~nothing (very high burst threshold, shallow duck); 1
     # catches the most and ducks hardest. Target stays below burst at all s.
