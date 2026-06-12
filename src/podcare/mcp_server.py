@@ -40,6 +40,7 @@ from .stages.deess import deess_track
 from .stages.dehum import dehum_track
 from .stages.denoise import denoise_track
 from .stages.dereverb import dereverb_track
+from .stages.dropouts import restore_dropouts_track
 from .stages.fillers import remove_fillers_session
 from .stages.gate import gate_track
 from .stages.leveler import leveler_track
@@ -47,6 +48,7 @@ from .stages.master import master_and_encode
 from .stages.mixdown import mixdown_session
 from .stages.plosives import deplosive_track
 from .stages.repair import repair_track
+from .stages.resonance import resonance_track
 from .stages.silence import tighten_track
 from .stages.tonebalance import tonebalance_track
 
@@ -67,9 +69,10 @@ mcp = FastMCP("podcare")
 _DESCRIBE = {s.name: s.describe for s in STAGES}
 
 # Stage names the `process` tool accepts in `disable` (the CLI `--no-*` set).
-_TOGGLEABLE = {"declip", "dehum", "align", "denoise", "dereverb", "tonebalance",
-               "declick", "plosives", "deess", "gate", "breath", "fillers",
-               "tighten", "leveler", "master"}
+_TOGGLEABLE = {"dropouts", "declip", "dehum", "align", "denoise", "dereverb",
+               "tonebalance", "declick", "plosives", "deess", "resonance",
+               "gate", "breath", "fillers", "tighten", "leveler", "exciter",
+               "master"}
 
 
 # --------------------------------------------------------------------------- #
@@ -119,6 +122,23 @@ def _session_stage(fn: Callable[[Session, Config], Session], name: str,
 # Per-track stage tools — write 48 kHz float WAV(s) so stages chain losslessly.
 # --------------------------------------------------------------------------- #
 @mcp.tool()
+def dropouts(input_paths: list[str], output_dir: str, strength: float = 0.8) -> dict:
+    """Fill brief packet-loss holes (3–50 ms) via two-sided LPC extrapolation.
+
+    Speech-gated and budget-capped so it never fabricates content: only gaps
+    whose surroundings are speech-active are filled, never more than ~1.2 s
+    per minute. Runs first in the pipeline so later stages see gap-free audio.
+
+    Args:
+        input_paths: One or more audio files.
+        output_dir: Directory for the output WAV(s).
+        strength: 0..1; scales the longest fillable gap (0 → 50 ms).
+    """
+    return _track_stage(restore_dropouts_track, "dropouts", input_paths, output_dir,
+                        Config(strength=strength))
+
+
+@mcp.tool()
 def repair(input_paths: list[str], output_dir: str,
            declip: bool = True, hpf_hz: float = 80.0) -> dict:
     """Restore each track: declick + declip and a rumble high-pass.
@@ -150,21 +170,25 @@ def dehum(input_paths: list[str], output_dir: str, strength: float = 0.8) -> dic
 
 
 @mcp.tool()
-def denoise(input_paths: list[str], output_dir: str, strength: float = 0.8) -> dict:
+def denoise(input_paths: list[str], output_dir: str, strength: float = 0.8,
+            dry_db: float = -12.0) -> dict:
     """Broadband neural denoise (DeepFilterNet3, 48 kHz full-band).
 
     Args:
         input_paths: One or more audio files.
         output_dir: Directory for the output WAV(s).
         strength: 0..1; sets the attenuation ceiling (0 → 60 dB).
+        dry_db: Ambience-preservation dry mix in dB — bounds the worst-case
+            suppression (~12 dB at the default) so marginal quiet words and
+            room tone are softened, never erased.
     """
     return _track_stage(denoise_track, "denoise", input_paths, output_dir,
-                        Config(strength=strength))
+                        Config(strength=strength, denoise_dry_db=dry_db))
 
 
 @mcp.tool()
 def dereverb(input_paths: list[str], output_dir: str, strength: float = 0.8,
-             chunk_s: float = 30.0, wpe_delay: int = 3) -> dict:
+             chunk_s: float = 15.0, wpe_delay: int = 3) -> dict:
     """WPE dereverberation — strip the late-reverberation room tail.
 
     Args:
@@ -233,6 +257,24 @@ def deess(input_paths: list[str], output_dir: str, strength: float = 0.8,
     """
     cfg = Config(strength=strength, deess_lo_hz=lo_hz, deess_hi_hz=hi_hz)
     return _track_stage(deess_track, "deess", input_paths, output_dir, cfg)
+
+
+@mcp.tool()
+def resonance(input_paths: list[str], output_dir: str, strength: float = 0.8) -> dict:
+    """Tame transient resonant peaks ("Soothe-lite"): ringy room modes, nasal
+    honk, 2–5 kHz harshness spikes that static EQ can't catch.
+
+    Cut-only dynamic STFT notching between 800 Hz and 9 kHz; bins poking above
+    their own spectral envelope are pulled down with musical attack/release.
+
+    Args:
+        input_paths: One or more audio files.
+        output_dir: Directory for the output WAV(s).
+        strength: 0..1; tightens the detection margin (18 → 6 dB) and raises
+            the max cut (0 → 10 dB).
+    """
+    return _track_stage(resonance_track, "resonance", input_paths, output_dir,
+                        Config(strength=strength))
 
 
 @mcp.tool()
@@ -355,9 +397,11 @@ def mixdown(input_paths: list[str], output_dir: str) -> dict:
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 def master(input_path: str, output_path: str, strength: float = 0.8,
-           compress: bool = True, lufs: float = -16.0, true_peak_db: float = -1.5,
-           out_sr: int = 44100, bitrate: str = "192k") -> dict:
-    """Master one mono program and encode it: MB-comp → loudnorm → TP-limit → encode.
+           compress: bool = True, exciter: bool = True, lufs: float = -16.0,
+           true_peak_db: float = -1.5, out_sr: int = 44100, bitrate: str = "192k",
+           intro_sound: str | None = None, outro_sound: str | None = None) -> dict:
+    """Master one mono program and encode it: MB-comp → exciter → loudnorm →
+    TP-limit → optional intro/outro bookends → encode.
 
     The output container is chosen from the ``output_path`` extension
     (.wav/.mp3/.flac/.m4a/.aac); WAV/FLAC are 16-bit with dither.
@@ -365,24 +409,33 @@ def master(input_path: str, output_path: str, strength: float = 0.8,
     Args:
         input_path: A single mono program WAV.
         output_path: Delivery file; its extension selects the container.
-        strength: 0..1; firms up the 3-band compression (off at 0). Loudness and
-            the true-peak limiter are absolute and always applied.
+        strength: 0..1; firms up the 3-band compression and the exciter amount
+            (both off at 0). Loudness and the true-peak limiter are absolute
+            and always applied.
         compress: Enable the multiband compressor.
+        exciter: Enable the harmonic presence exciter (synthesized 8–16 kHz
+            "air", included in the loudness measurement).
         lufs: Integrated-loudness target (EBU R128), validated -40..-5.
         true_peak_db: True-peak ceiling in dBTP.
         out_sr: Output sample rate (single final resample).
         bitrate: MP3/AAC bitrate (ignored for WAV/FLAC).
+        intro_sound: Optional sound placed before the program — loudness-matched
+            to the target and joined with a 100 ms equal-power crossfade.
+        outro_sound: Optional sound placed after the program (same treatment).
     """
     audio_io.require_ffmpeg()
-    cfg = Config(strength=strength, compress=compress, lufs=lufs,
+    cfg = Config(strength=strength, compress=compress, exciter=exciter, lufs=lufs,
                  true_peak_db=true_peak_db, out_sr=out_sr, lossy_bitrate=bitrate)
     session = load_session([Path(input_path)], cfg)
     if len(session.tracks) != 1:
         raise ValueError("master expects exactly one input (a mono program)")
+    intro = audio_io.decode(Path(intro_sound), cfg.sr) if intro_sound else None
+    outro = audio_io.decode(Path(outro_sound), cfg.sr) if outro_sound else None
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    master_and_encode(session.tracks[0], cfg, out)
-    return {"stage": "master", "output": str(out), "out_sr": out_sr, "lufs": lufs}
+    master_and_encode(session.tracks[0], cfg, out, intro=intro, outro=outro)
+    return {"stage": "master", "output": str(out), "out_sr": out_sr, "lufs": lufs,
+            "bookends": {"intro": intro is not None, "outro": outro is not None}}
 
 
 @mcp.tool()
@@ -390,6 +443,7 @@ def process(input_paths: list[str], output_path: str, strength: float = 0.8,
             nocut: bool = False, lufs: float = -16.0, out_sr: int = 44100,
             bitrate: str = "192k", whisper_model: str = "large-v3",
             language: str | None = None, filler_sensitivity: float | None = None,
+            intro_sound: str | None = None, outro_sound: str | None = None,
             disable: list[str] | None = None) -> dict:
     """Run the full Podcare pipeline: decode → all stages → master → encode.
 
@@ -407,9 +461,15 @@ def process(input_paths: list[str], output_path: str, strength: float = 0.8,
         whisper_model: faster-whisper model for filler detection.
         language: Force the spoken language; None auto-detects.
         filler_sensitivity: Override filler aggressiveness 0..1 (0 disables).
+        intro_sound: Optional sound placed before the finished program
+            (loudness-matched, 100 ms crossfade). Ignored with nocut, which
+            promises a sample-aligned timeline.
+        outro_sound: Optional sound placed after the program (same treatment,
+            same nocut rule).
         disable: Stage names to turn off, e.g. ["dereverb", "tighten"]. Valid:
-            declip, dehum, align, denoise, dereverb, tonebalance, declick,
-            plosives, deess, gate, breath, fillers, tighten, leveler, master.
+            dropouts, declip, dehum, align, denoise, dereverb, tonebalance,
+            declick, plosives, deess, resonance, gate, breath, fillers,
+            tighten, leveler, exciter, master.
     """
     off = set(disable or [])
     unknown = off - _TOGGLEABLE
@@ -422,24 +482,34 @@ def process(input_paths: list[str], output_path: str, strength: float = 0.8,
         raise ValueError("lufs must be between -40 and -5")
     if not 8000 <= out_sr <= 192000:
         raise ValueError("out_sr must be between 8000 and 192000")
+    bookends_ignored = bool(nocut and (intro_sound or outro_sound))
+    if bookends_ignored:  # mirror the CLI: warn and ignore, don't fail the render
+        log.warning("intro/outro sounds ignored because nocut keeps the original timeline")
+        intro_sound = outro_sound = None
 
     cfg = Config(
         strength=strength, nocut=nocut, lufs=lufs, out_sr=out_sr,
         lossy_bitrate=bitrate, whisper_model=whisper_model, language=language,
         filler_sensitivity=0.0 if "fillers" in off else filler_sensitivity,
-        declip="declip" not in off, dehum="dehum" not in off,
-        align="align" not in off, denoise="denoise" not in off,
-        dereverb="dereverb" not in off, tonebalance="tonebalance" not in off,
-        declick="declick" not in off, plosives="plosives" not in off,
-        deess="deess" not in off, gate="gate" not in off,
+        intro_sound=Path(intro_sound) if intro_sound else None,
+        outro_sound=Path(outro_sound) if outro_sound else None,
+        dropouts="dropouts" not in off, declip="declip" not in off,
+        dehum="dehum" not in off, align="align" not in off,
+        denoise="denoise" not in off, dereverb="dereverb" not in off,
+        tonebalance="tonebalance" not in off, declick="declick" not in off,
+        plosives="plosives" not in off, deess="deess" not in off,
+        resonance="resonance" not in off, gate="gate" not in off,
         breath="breath" not in off, fillers="fillers" not in off,
         tighten="tighten" not in off, leveler="leveler" not in off,
-        master="master" not in off,
+        exciter="exciter" not in off, master="master" not in off,
     )
     out = Path(output_path)
     in_dur, out_dur = run([Path(p) for p in input_paths], out, cfg)
-    return {"output": str(out), "input_minutes": round(in_dur / 60, 2),
-            "output_minutes": round(out_dur / 60, 2)}
+    result = {"output": str(out), "input_minutes": round(in_dur / 60, 2),
+              "output_minutes": round(out_dur / 60, 2)}
+    if bookends_ignored:
+        result["bookends_ignored"] = "nocut keeps the original timeline"
+    return result
 
 
 def main() -> None:

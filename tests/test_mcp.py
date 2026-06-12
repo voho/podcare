@@ -33,9 +33,44 @@ def _two_mics(tmp_path):
 def test_every_stage_is_a_tool():
     names = {t.name for t in asyncio.run(m.mcp.list_tools())}
     # One tool per pipeline stage toggle, plus mixdown/process orchestration.
-    assert m._TOGGLEABLE - {"declip"} <= names  # 'declip' is exposed as the 'repair' tool
-    assert "repair" in names
+    # 'declip' is exposed as the 'repair' tool; 'exciter' is a `master` param.
+    assert m._TOGGLEABLE - {"declip", "exciter"} <= names
+    assert {"repair", "dropouts", "resonance"} <= names
     assert {"mixdown", "master", "process"} <= names
+
+
+def test_new_stage_tools_run(tmp_path):
+    a, _ = _two_mics(tmp_path)
+    for tool in ("dropouts", "resonance"):
+        res = _call(tool, {"input_paths": [str(a)],
+                           "output_dir": str(tmp_path / tool), "strength": 0.8})
+        assert res["stage"] == tool and len(res["outputs"]) == 1
+        assert sf.info(res["outputs"][0]).samplerate == SR
+
+
+def test_master_supports_bookends(tmp_path):
+    a, _ = _two_mics(tmp_path)
+    sting = tmp_path / "sting.wav"
+    sf.write(sting, 0.2 * speech_like(1, seed=5), SR, subtype="FLOAT")
+    out = tmp_path / "final.wav"
+    res = _call("master", {"input_path": str(a), "output_path": str(out),
+                           "strength": 0.5, "out_sr": SR,
+                           "intro_sound": str(sting), "outro_sound": str(sting)})
+    assert out.exists()
+    # intro (1 s) + program (4 s) + outro (1 s) - 2 x 0.1 s crossfades
+    expected = int(6 * SR - 2 * 0.1 * SR)
+    assert abs(sf.info(out).frames - expected) < int(0.02 * SR)
+    assert res["bookends"] == {"intro": True, "outro": True}
+
+
+def test_process_accepts_new_stage_toggles(tmp_path):
+    a, _ = _two_mics(tmp_path)
+    out = tmp_path / "ep.wav"
+    res = _call("process", {"input_paths": [str(a)], "output_path": str(out),
+                            "strength": 0.5,
+                            "disable": ["fillers", "dereverb", "dropouts",
+                                        "resonance", "exciter"]})
+    assert out.exists() and res["output_minutes"] > 0
 
 
 def test_track_stage_writes_one_output_per_input(tmp_path):

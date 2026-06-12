@@ -118,23 +118,25 @@ stage in isolation and chain them yourself.
 
 | Tool | What it does | Key params (defaults) |
 |---|---|---|
-| `process` | Full pipeline → one delivery file | `strength=0.8`, `nocut=false`, `lufs=-16`, `out_sr=44100`, `bitrate=192k`, `whisper_model=large-v3`, `language`, `filler_sensitivity`, `disable=[…]` |
+| `process` | Full pipeline → one delivery file | `strength=0.8`, `nocut=false`, `lufs=-16`, `out_sr=44100`, `bitrate=192k`, `whisper_model=large-v3`, `language`, `filler_sensitivity`, `intro_sound`, `outro_sound`, `disable=[…]` |
+| `dropouts` | Packet-loss gap fill (two-sided LPC) | `strength=0.8` |
 | `repair` | Declick + declip + rumble HPF | `declip=true`, `hpf_hz=80` |
 | `dehum` | Mains-hum harmonic notching | `strength=0.8` |
 | `align` | Inter-track offset + polarity (≥ 2 tracks) | `window_s=300`, `min_confidence=12` |
-| `denoise` | DeepFilterNet3 neural denoise | `strength=0.8` |
-| `dereverb` | WPE dereverberation | `strength=0.8`, `chunk_s=30`, `wpe_delay=3` |
+| `denoise` | DeepFilterNet3 neural denoise | `strength=0.8`, `dry_db=-12` |
+| `dereverb` | WPE dereverberation | `strength=0.8`, `chunk_s=15`, `wpe_delay=3` |
 | `tonebalance` | LTAS → broadcast-voice EQ | `strength=0.8` |
 | `declick` | Mouth-click / de-crackle | `strength=0.8` |
 | `plosives` | Plosive ("p-pop") ducking | `strength=0.8`, `max_hz=150` |
 | `deess` | Sibilance control | `strength=0.8`, `lo_hz=4500`, `hi_hz=9500` |
+| `resonance` | Dynamic resonance / harshness taming | `strength=0.8` |
 | `gate` | Crosstalk gate + level match | `strength=0.8`, `level_target_dbfs=-20` |
 | `breath` | Breath ducking | `strength=0.8` |
 | `fillers` | Filler-word removal (ASR + align) | `strength=0.8`, `sensitivity`, `whisper_model`, `language`, `pad_s` |
 | `mixdown` | Sum cleaned tracks → mono program | — |
 | `tighten` | Pause / dead-air tightening | `strength=0.8`, `max_pause_s`, `target_pause_s`, `lead_trail_s=0.5` |
 | `leveler` | Slow segment-loudness ride | `strength=0.8` |
-| `master` | MB-comp + loudnorm + TP-limit + encode | `strength=0.8`, `compress=true`, `lufs=-16`, `true_peak_db=-1.5`, `out_sr=44100`, `bitrate=192k` |
+| `master` | MB-comp + exciter + loudnorm + TP-limit + bookends + encode | `strength=0.8`, `compress=true`, `exciter=true`, `lufs=-16`, `true_peak_db=-1.5`, `out_sr=44100`, `bitrate=192k`, `intro_sound`, `outro_sound` |
 
 Every param defaults to the same value as the CLI (sourced from
 [src/podcare/config.py](src/podcare/config.py)); `strength` is the one universal
