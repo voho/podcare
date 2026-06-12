@@ -14,7 +14,7 @@ import logging
 import numpy as np
 
 from ..config import Config
-from ..dsp import process_chunked
+from ..dsp import db_to_lin, process_chunked
 from ..session import Track
 
 log = logging.getLogger(__name__)
@@ -77,11 +77,22 @@ def denoise_track(track: Track, cfg: Config) -> Track:
         raise RuntimeError(f"DeepFilterNet expects {df_state.sr()} Hz, pipeline is {cfg.sr} Hz")
     atten = cfg.df_atten_lim_db()
 
+    dry_mix = db_to_lin(cfg.denoise_dry_db)
+
     def run_chunk(chunk: np.ndarray) -> np.ndarray:
         with torch.no_grad():
             t = torch.from_numpy(np.ascontiguousarray(chunk, dtype=np.float32))[None, :]
             out = enhance(model, df_state, t, atten_lim_db=atten)
-        return out[0].cpu().numpy().astype(np.float32)
+        wet = out[0].cpu().numpy().astype(np.float32)
+        if len(wet) != len(chunk):  # pin length so the blend below lines up
+            wet = (wet[: len(chunk)] if len(wet) > len(chunk)
+                   else np.pad(wet, (0, len(chunk) - len(wet))))
+        # Ambience preservation: blend a fixed share of the dry signal back so
+        # the worst-case suppression is bounded (~12 dB at the default) — DFN
+        # at a high attenuation ceiling otherwise erases marginal quiet words
+        # outright (and dead-silent gaps sound unnatural). Unity when DFN
+        # removes nothing; -12 dB floor when it removes everything.
+        return ((1.0 - dry_mix) * wet + dry_mix * chunk).astype(np.float32)
 
     audio = process_chunked(track.audio, cfg.sr, run_chunk, chunk_s=_DF_CHUNK_S,
                             label=f"denoise · {track.name}")

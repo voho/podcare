@@ -174,6 +174,43 @@ class TestGate:
         assert gap_gain < speech_gain * 0.5, (
             f"gap not gated (speech x{speech_gain:.2f}, gap x{gap_gain:.2f})")
 
+    def test_quiet_word_after_pause_not_swallowed(self):
+        # A quiet word ABOVE the expander threshold, arriving right after a
+        # ducked pause, must not lose its onset to a slow-opening gate.
+        rng = np.random.default_rng(9)
+        loud = speech_like(3, seed=9, level=0.3)
+        pause = (0.002 * rng.standard_normal(int(0.6 * SR))).astype(np.float32)
+        t = np.arange(int(0.15 * SR)) / SR
+        word = (0.03 * (0.6 * np.sin(2 * np.pi * 160 * t)
+                        + 0.3 * np.sin(2 * np.pi * 320 * t))).astype(np.float32)
+        audio = np.concatenate([loud, pause, word, pause, loud])
+        out = gate_track(Track("x", audio), CFG).audio
+        a = len(loud) + len(pause)
+        b = a + len(word)
+
+        def db(x):
+            return 10 * np.log10(float(np.mean(x.astype(np.float64) ** 2)) + 1e-20)
+
+        d_word = db(out[a:b]) - db(audio[a:b])
+        d_loud = db(out[: len(loud)]) - db(audio[: len(loud)])
+        assert d_word - d_loud > -2.0, (
+            f"quiet word swallowed: {d_word - d_loud:+.1f} dB vs loud speech")
+
+
+class TestDenoise:
+    def test_noise_suppression_bounded_by_dry_floor(self):
+        # Ambience preservation: DFN may clean, but a dry-mix floor bounds the
+        # worst-case removal near -12 dB so marginal quiet words and room tone
+        # are never erased outright.
+        from podcare.stages.denoise import denoise_track
+        rng = np.random.default_rng(14)
+        noise = (0.01 * rng.standard_normal(SR * 4)).astype(np.float32)
+        out = denoise_track(Track("x", noise), CFG).audio
+        delta = (10 * np.log10(float(np.mean(out.astype(np.float64) ** 2)) + 1e-20)
+                 - 10 * np.log10(float(np.mean(noise.astype(np.float64) ** 2)) + 1e-20))
+        assert -14.0 < delta < -9.0, (
+            f"dry floor should bound suppression near -12 dB (got {delta:+.1f} dB)")
+
 
 class TestDereverb:
     def test_runs_and_preserves_shape(self):
@@ -398,6 +435,50 @@ class TestBreath:
         clean = speech_like(5, seed=44, level=0.35)
         out = breath_track(Track("c", clean), CFG).audio
         assert float(np.corrcoef(clean, out)[0, 1]) > 0.999
+
+    @staticmethod
+    def _quiet_word(core_voiced: bool) -> tuple[np.ndarray, int, int]:
+        """Loud phrase, pause, quiet word (unvoiced flanks ± voiced core), pause, loud."""
+        from scipy.signal import butter, sosfilt
+        rng = np.random.default_rng(12)
+        loud = speech_like(3, seed=12, level=0.3)
+        pause = (0.002 * rng.standard_normal(int(0.5 * SR))).astype(np.float32)
+        sos = butter(2, [500, 4000], btype="bandpass", fs=SR, output="sos")
+
+        def fric(dur: float) -> np.ndarray:
+            n = sosfilt(sos, rng.standard_normal(int(dur * SR)))
+            return (0.045 * n / (np.std(n) + 1e-9)).astype(np.float32)
+
+        if core_voiced:
+            t = np.arange(int(0.10 * SR)) / SR
+            core = (0.05 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
+            word = np.concatenate([fric(0.10), core, fric(0.12)])
+        else:
+            word = fric(0.25)
+        audio = np.concatenate([loud, pause, word, pause, loud]).astype(np.float32)
+        a = len(loud) + len(pause)
+        return audio, a, a + len(word)
+
+    @staticmethod
+    def _delta_db(out, audio, a, b):
+        def db(x):
+            return 10 * np.log10(float(np.mean(x.astype(np.float64) ** 2)) + 1e-20)
+        return db(out[a:b]) - db(audio[a:b])
+
+    def test_quiet_word_with_voiced_core_untouched(self):
+        # "six"/"sest" said softly: unvoiced flanks around a voiced core. The
+        # flanks are NOT breaths — they belong to a word — and must survive.
+        from podcare.stages.breath import breath_track
+        audio, a, b = self._quiet_word(core_voiced=True)
+        out = breath_track(Track("x", audio), CFG).audio
+        assert self._delta_db(out, audio, a, b) > -1.5, "quiet word breath-ducked"
+
+    def test_isolated_breath_still_ducked(self):
+        # A fully-unvoiced isolated burst between phrases IS a breath: duck it.
+        from podcare.stages.breath import breath_track
+        audio, a, b = self._quiet_word(core_voiced=False)
+        out = breath_track(Track("x", audio), CFG).audio
+        assert self._delta_db(out, audio, a, b) < -5.0, "real breath no longer ducked"
 
 
 class TestFillerCrossTrack:

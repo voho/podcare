@@ -26,8 +26,13 @@ def gate_track(track: Track, cfg: Config) -> Track:
     below = rms < thresh
     gains[below] = np.maximum(depth, rms[below] / thresh)
 
-    # ~5 ms attack, ~160 ms release at hop 256 @ 48 kHz.
-    gains = smooth_gain(gains, attack_blocks=1.0, release_blocks=30.0)
+    # Standard gate timing: OPEN fast (~10 ms) so a word arriving after a
+    # ducked pause never loses its onset, CLOSE slow (~160 ms hold) so the
+    # gate doesn't chatter at phrase ends. (In smooth_gain terms attack =
+    # gain falling = closing; release = gain rising = opening. The previous
+    # 5 ms-close/160 ms-open inversion swallowed the first ~150 ms of every
+    # quiet word that followed a pause.)
+    gains = smooth_gain(gains, attack_blocks=30.0, release_blocks=2.0)
     env = gain_to_samples(gains, _HOP, len(track.audio))
     gated = track.audio * env
 

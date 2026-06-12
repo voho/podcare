@@ -34,6 +34,7 @@ _BREATH_MAX_REL_DB = -6.0  # breaths sit below loud speech; fricatives do not
 _AUDIBLE_FLOOR_MULT = 2.0  # must clear 2× the noise floor to be worth ducking
 _ZCR_MIN = 0.05            # per-segment unvoiced confirmation
 _VOICED_MAX = 0.5          # low-band / mid-band energy ratio; breaths are unvoiced
+_WORD_GUARD_BLOCKS = 2     # ±40 ms: a voiced QUIET neighbor marks a word, not a breath
 
 
 def _block_zcr(audio: np.ndarray, hop: int, n_blocks: int) -> np.ndarray:
@@ -77,9 +78,13 @@ def breath_track(track: Track, cfg: Config) -> Track:
         return track
 
     zcr = _block_zcr(track.audio, hop, n_blocks)
-    candidate = ((zcr >= _VOICED_ZCR)                          # unvoiced
-                 & (rms > _AUDIBLE_FLOOR_MULT * noise_floor)   # audible
-                 & (rms < speech_ref * db_to_lin(_BREATH_MAX_REL_DB)))  # below speech
+    audible = rms > _AUDIBLE_FLOOR_MULT * noise_floor
+    below_speech = rms < speech_ref * db_to_lin(_BREATH_MAX_REL_DB)
+    candidate = (zcr >= _VOICED_ZCR) & audible & below_speech  # unvoiced, audible, quiet
+    # A voiced block at the same QUIET level marks the core of a softly spoken
+    # word — the unvoiced runs flanking it are that word's consonants, not
+    # breaths. (The level test alone only protects fricatives of LOUD words.)
+    voiced_quiet = (zcr < _VOICED_ZCR) & audible & below_speech
 
     gains = np.ones_like(rms)
     n = 0
@@ -87,6 +92,10 @@ def breath_track(track: Track, cfg: Config) -> Track:
     for i0, i1 in _runs(candidate):
         if not (_MIN_BREATH_S <= (i1 - i0) * _BLOCK_S <= _MAX_BREATH_S):
             continue
+        lo = max(0, i0 - _WORD_GUARD_BLOCKS)
+        hi = min(n_blocks, i1 + _WORD_GUARD_BLOCKS)
+        if voiced_quiet[lo:i0].any() or voiced_quiet[i1:hi].any():
+            continue  # word-internal consonant cluster, not an isolated breath
         if not _is_breath(track.audio[i0 * hop:i1 * hop], sr):
             continue
         gains[i0:i1] = duck

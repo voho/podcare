@@ -403,7 +403,10 @@ Tracks are then zero-padded to equal length.
 **How it works.** **DeepFilterNet3**, a full-band 48 kHz neural speech-enhancement
 model that separates voice from noise far more cleanly than classical methods.
 Weights ship inside the package (no download). Processed in **60 s chunks with a
-1 s crossfade** so memory stays bounded on hour-long files.
+1 s crossfade** so memory stays bounded on hour-long files. A fixed share of the
+**dry signal is mixed back** ("ambience preservation"): it bounds the worst-case
+suppression near 12 dB, so marginal quiet words and room tone are softened rather
+than erased — full removal sounds unnaturally dead and can swallow soft speech.
 
 **Strength.** Sets the **attenuation ceiling** — a continuous, finite dB value;
 60 dB at the top is already effectively full suppression for speech.
@@ -413,6 +416,7 @@ Weights ship inside the package (no download). Processed in **60 s chunks with a
 | Stage enabled | on | CLI `--no-denoise` |
 | Model | DeepFilterNet3 (48 kHz full-band) | Hardcoded |
 | Attenuation ceiling | `0 → 60 dB` (48 dB @ 0.8) | **Strength** |
+| Dry mix (suppression floor) | −12 dB | `Config.denoise_dry_db` |
 | Chunk / crossfade | 60 s / 1 s | Hardcoded |
 
 > Note: DeepFilterNet 0.5.x imports `torchaudio.backend.common`, which newer
@@ -589,9 +593,12 @@ levels.
 
 **How it works.** A **downward expander (gate):** below an adaptive speech/noise
 threshold the track is pushed down (2:1, floored at the gate depth), suppressing
-the other speaker's bleed; a slow release protects word tails. **Level matching:**
-each track's *speech-active* RMS is normalized toward a target so a quiet guest and
-a loud host arrive balanced.
+the other speaker's bleed. Standard gate timing: it **opens fast (~10 ms)** so a
+word arriving right after a ducked pause keeps its onset — a slow-opening gate
+audibly "swallows" quiet first words — and **closes slow (~160 ms hold)** so word
+tails ring out and the gate never chatters. **Level matching:** each track's
+*speech-active* RMS is normalized toward a target so a quiet guest and a loud
+host arrive balanced.
 
 **Strength.** Sets how deep the gate cuts.
 
@@ -601,6 +608,7 @@ a loud host arrive balanced.
 | Gate depth (max attenuation) | `0 → 24 dB` (19.2 dB @ 0.8) | **Strength** |
 | Speech-level target | −20 dBFS | `Config.level_target_dbfs` |
 | Expansion ratio | 2:1 | Hardcoded |
+| Open / close (hold) time | ~10 ms / ~160 ms | Hardcoded |
 
 ---
 
@@ -613,9 +621,12 @@ and loudnorm push the quiet detail forward, they become a prominent earbud tell.
 **How it works.** Breaths are detected by *what they are*, not level alone: short
 segments that are **unvoiced** (high zero-crossing rate, no low fundamental),
 **audible** (above the noise floor) but **below speech level** (which protects
-in-word fricatives, that sit at full speech level), of breath-like duration, and
-confirmed by spectral shape (mid-band, unvoiced). Flagged spans are **ducked**
-(never muted) by a capped amount with smooth ramps, preserving cadence.
+in-word fricatives of normally spoken words), of breath-like duration, and
+confirmed by spectral shape (mid-band, unvoiced). A **softly spoken word** is
+protected separately: a voiced block at the same quiet level within ±40 ms marks
+the segment as a word's consonant cluster, not a breath, and it is skipped.
+Flagged spans are **ducked** (never muted) by a capped amount with smooth ramps,
+preserving cadence.
 
 **Strength.** Sets the duck depth — capped at 14 dB (a duck, never a mute).
 
@@ -626,6 +637,7 @@ confirmed by spectral shape (mid-band, unvoiced). Flagged spans are **ducked**
 | Breath duration window | 0.08–0.7 s | Hardcoded |
 | Voiced/unvoiced split | zero-crossing rate | Hardcoded |
 | Level gate | below speech, above 2× noise floor | Hardcoded |
+| Quiet-word guard | voiced quiet block within ±40 ms | Hardcoded |
 
 ---
 

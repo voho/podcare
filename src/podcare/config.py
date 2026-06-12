@@ -57,8 +57,13 @@ class Config:
     align_min_confidence: float = 12.0  # z-score of the GCC-PHAT peak required to apply a shift
 
     # Denoise — DeepFilterNet3 (neural, full-band 48 kHz). Strength sets the
-    # attenuation ceiling (see df_atten_lim_db).
+    # attenuation ceiling (see df_atten_lim_db). denoise_dry_db mixes a fixed
+    # share of the pre-denoise signal back in ("ambience preservation"): it
+    # bounds the worst-case suppression near 12 dB so marginal quiet words and
+    # room tone are softened, never erased — full removal sounds unnaturally
+    # dead. A character knob (absolute, not strength-scaled).
     denoise: bool = True
+    denoise_dry_db: float = -12.0
 
     # Dereverb (WPE linear prediction; complements DeepFilterNet)
     dereverb: bool = True
