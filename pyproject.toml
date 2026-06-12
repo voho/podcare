@@ -19,8 +19,14 @@ dependencies = [
     "rich>=13.0",
 ]
 
+[project.optional-dependencies]
+# MCP server: exposes every pipeline stage (and the full pipeline) as MCP tools.
+# Optional so the core install stays lean — `uv sync --extra mcp` to enable it.
+mcp = ["mcp>=1.2"]
+
 [project.scripts]
 podcare = "podcare.cli:main"
+podcare-mcp = "podcare.mcp_server:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
