@@ -177,7 +177,7 @@ def run(inputs: list[Path], out_path: Path, cfg: Config,
         if cfg.master:
             comp = (f"mb-comp(3-band) {cfg.comp_ratio():.1f}:1@{cfg.comp_threshold():.2f} "
                     if cfg.compress and cfg.s > 0 else "comp=off ")
-            exc = (f"exciter={cfg.exciter_amount():.1f} "
+            exc = (f"exciter={cfg.eff_exciter_amount():.1f} "
                    if cfg.exciter and cfg.s > 0 else "exciter=off ")
             params = (f"{comp}{exc}loudnorm I={cfg.lufs:.0f}LUFS TP={cfg.true_peak_db:.1f}dB "
                       f"+TP-limiter -> {cfg.out_sr}Hz")

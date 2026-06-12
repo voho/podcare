@@ -199,17 +199,17 @@ class TestGate:
 
 class TestDenoise:
     def test_noise_suppression_bounded_by_dry_floor(self):
-        # Ambience preservation: DFN may clean, but a dry-mix floor bounds the
-        # worst-case removal near -12 dB so marginal quiet words and room tone
-        # are never erased outright.
+        # Ambience preservation: DFN may clean, but the dry-mix floor bounds the
+        # worst-case removal near the configured dry level (-15 dB default) so
+        # marginal quiet words and room tone are never erased outright.
         from podcare.stages.denoise import denoise_track
         rng = np.random.default_rng(14)
         noise = (0.01 * rng.standard_normal(SR * 4)).astype(np.float32)
         out = denoise_track(Track("x", noise), CFG).audio
         delta = (10 * np.log10(float(np.mean(out.astype(np.float64) ** 2)) + 1e-20)
                  - 10 * np.log10(float(np.mean(noise.astype(np.float64) ** 2)) + 1e-20))
-        assert -14.0 < delta < -9.0, (
-            f"dry floor should bound suppression near -12 dB (got {delta:+.1f} dB)")
+        assert -17.0 < delta < -12.0, (
+            f"dry floor should bound suppression near -15 dB (got {delta:+.1f} dB)")
 
 
 class TestDereverb:
@@ -654,23 +654,49 @@ class TestResonance:
 
 
 class TestExciter:
-    def test_adds_high_band_energy(self, tmp_path):
+    def test_adds_a_tasteful_amount_of_air(self, tmp_path):
+        # Realistic source material: voice plus broadband 4-8 kHz "consonant"
+        # energy for aexciter to derive harmonics from. The synthesized air
+        # lands above the source band, so measure >9 kHz. The default is a
+        # *touch* of air (not the old harsh setting), so assert it is added but
+        # bounded — the upper bound guards against re-introducing an extreme
+        # default.
         from scipy.signal import butter, sosfilt
-        t = np.arange(SR * 4) / SR
-        dull = (0.3 * (np.sin(2 * np.pi * 400 * t)
-                       + 0.5 * np.sin(2 * np.pi * 2000 * t)
-                       + 0.25 * np.sin(2 * np.pi * 5000 * t))).astype(np.float32)
+        rng = np.random.default_rng(3)
+        voice = speech_like(4, seed=3, level=0.3)
+        src = sosfilt(butter(4, [4000, 8000], btype="bandpass", fs=SR, output="sos"),
+                      rng.standard_normal(len(voice)))
+        sig = (voice + 0.05 * src / (np.std(src) + 1e-9)).astype(np.float32)
         on_path, off_path = tmp_path / "on.wav", tmp_path / "off.wav"
-        master_and_encode(Track("x", dull), Config(out_sr=SR), on_path)
-        master_and_encode(Track("x", dull), Config(out_sr=SR, exciter=False), off_path)
+        master_and_encode(Track("x", sig), Config(out_sr=SR), on_path)
+        master_and_encode(Track("x", sig), Config(out_sr=SR, exciter=False), off_path)
 
-        def hf_rms(p):
+        def air(p):
             a, _ = sf.read(p)
-            sos = butter(4, 7000, btype="highpass", fs=SR, output="sos")
+            sos = butter(4, 9000, btype="highpass", fs=SR, output="sos")
             return float(np.std(sosfilt(sos, a)))
 
-        assert hf_rms(on_path) > hf_rms(off_path) * 1.5, \
-            "exciter must add energy above 7 kHz"
+        ratio = air(on_path) / (air(off_path) + 1e-12)
+        assert 1.1 < ratio < 2.0, f"exciter air {ratio:.2f}x — want present but not extreme"
+
+    def test_amount_override_drives_more_air(self, tmp_path):
+        from scipy.signal import butter, sosfilt
+        rng = np.random.default_rng(3)
+        voice = speech_like(4, seed=3, level=0.3)
+        src = sosfilt(butter(4, [4000, 8000], btype="bandpass", fs=SR, output="sos"),
+                      rng.standard_normal(len(voice)))
+        sig = (voice + 0.05 * src / (np.std(src) + 1e-9)).astype(np.float32)
+
+        def air(cfg):
+            p = tmp_path / "x.wav"
+            master_and_encode(Track("x", sig), cfg, p)
+            a, _ = sf.read(p)
+            return float(np.std(sosfilt(butter(4, 9000, btype="highpass", fs=SR,
+                                                output="sos"), a)))
+
+        gentle = air(Config(out_sr=SR, exciter_amount=0.4))
+        hot = air(Config(out_sr=SR, exciter_amount=2.0, exciter_drive=8.5))
+        assert hot > gentle, "exciter_amount override must scale the air"
 
     def test_strength_zero_is_noop(self, tmp_path):
         t = np.arange(SR * 2) / SR

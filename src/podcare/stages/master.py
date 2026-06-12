@@ -72,13 +72,16 @@ def _exciter(cfg: Config) -> str:
     above the highest test-signal component (5 kHz), so the filter had nothing
     to excite and only leaked distortion.
 
-    Amount: ``cfg.exciter_amount()`` maps 0→2.5 linearly with strength. At
-    these conservative levels the output peak stays ≤ ~1.3× the input peak
-    (empirically measured), well within the safe range for loudnorm; no
-    chained limiter is needed or desirable. ``ceil=16000`` lifts aexciter's
-    default ~10 kHz harmonic ceiling so the synthesized air actually reaches
-    the 12–16 kHz region it is meant to restore."""
-    return f"aexciter=amount={cfg.exciter_amount():.2f}:freq=4000:ceil=16000"
+    Amount: ``cfg.eff_exciter_amount()`` maps 0→1.0 with strength (overridable).
+    Deliberately gentle: amount 0.8 at ``drive`` 4 lifts the >6 kHz presence
+    band ~+3 dB — a touch of air, not a sheen. A hotter amount/drive both reads
+    as harsh and excites residual HF noise on the voice. ``drive`` (smaller =
+    smoother harmonics) is ``cfg.exciter_drive``. ``ceil=16000`` lifts
+    aexciter's default ~10 kHz harmonic ceiling so the synthesized air reaches
+    the 12–16 kHz region it is meant to restore. Output peak stays well within
+    the safe range for loudnorm; no chained limiter is needed."""
+    return (f"aexciter=amount={cfg.eff_exciter_amount():.2f}"
+            f":drive={cfg.exciter_drive:.1f}:freq=4000:ceil=16000")
 
 
 def _finite(x) -> bool:
@@ -173,7 +176,8 @@ def master_and_encode(track: Track, cfg: Config, out_path: Path, *,
         # aexciter preserves length; pin it exactly like the multiband pass.
         audio = (excited[: len(audio)] if len(excited) >= len(audio)
                  else np.pad(excited, (0, len(audio) - len(excited))))
-        log.info("master: exciter amount=%.2f", cfg.exciter_amount())
+        log.info("master: exciter amount=%.2f drive=%.1f",
+                 cfg.eff_exciter_amount(), cfg.exciter_drive)
 
     measured = audio_io.measure_loudnorm(audio, cfg.sr, pre_filters=None,
                                          lufs=cfg.lufs, true_peak=cfg.true_peak_db)

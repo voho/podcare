@@ -123,7 +123,7 @@ stage in isolation and chain them yourself.
 | `repair` | Declick + declip + rumble HPF | `declip=true`, `hpf_hz=80` |
 | `dehum` | Mains-hum harmonic notching | `strength=0.8` |
 | `align` | Inter-track offset + polarity (≥ 2 tracks) | `window_s=300`, `min_confidence=12` |
-| `denoise` | DeepFilterNet3 neural denoise | `strength=0.8`, `dry_db=-12` |
+| `denoise` | DeepFilterNet3 neural denoise | `strength=0.8`, `dry_db=-15` |
 | `dereverb` | WPE dereverberation | `strength=0.8`, `chunk_s=15`, `wpe_delay=3` |
 | `tonebalance` | LTAS → broadcast-voice EQ | `strength=0.8` |
 | `declick` | Mouth-click / de-crackle | `strength=0.8` |
@@ -136,7 +136,7 @@ stage in isolation and chain them yourself.
 | `mixdown` | Sum cleaned tracks → mono program | — |
 | `tighten` | Pause / dead-air tightening | `strength=0.8`, `max_pause_s`, `target_pause_s`, `lead_trail_s=0.5` |
 | `leveler` | Slow segment-loudness ride | `strength=0.8` |
-| `master` | MB-comp + exciter + loudnorm + TP-limit + bookends + encode | `strength=0.8`, `compress=true`, `exciter=true`, `lufs=-16`, `true_peak_db=-1.5`, `out_sr=44100`, `bitrate=192k`, `intro_sound`, `outro_sound` |
+| `master` | MB-comp + exciter + loudnorm + TP-limit + bookends + encode | `strength=0.8`, `compress=true`, `exciter=true`, `exciter_amount`, `exciter_drive=4`, `lufs=-16`, `true_peak_db=-1.5`, `out_sr=44100`, `bitrate=192k`, `intro_sound`, `outro_sound` |
 
 Every param defaults to the same value as the CLI (sourced from
 [src/podcare/config.py](src/podcare/config.py)); `strength` is the one universal
@@ -407,7 +407,7 @@ model that separates voice from noise far more cleanly than classical methods.
 Weights ship inside the package (no download). Processed in **60 s chunks with a
 1 s crossfade** so memory stays bounded on hour-long files. A fixed share of the
 **dry signal is mixed back** ("ambience preservation"): it bounds the worst-case
-suppression near 12 dB, so marginal quiet words and room tone are softened rather
+suppression near 15 dB, so marginal quiet words and room tone are softened rather
 than erased — full removal sounds unnaturally dead and can swallow soft speech.
 
 **Strength.** Sets the **attenuation ceiling** — a continuous, finite dB value;
@@ -418,7 +418,7 @@ than erased — full removal sounds unnaturally dead and can swallow soft speech
 | Stage enabled | on | CLI `--no-denoise` |
 | Model | DeepFilterNet3 (48 kHz full-band) | Hardcoded |
 | Attenuation ceiling | `0 → 60 dB` (48 dB @ 0.8) | **Strength** |
-| Dry mix (suppression floor) | −12 dB | `Config.denoise_dry_db` |
+| Dry mix (suppression floor) | −15 dB | `Config.denoise_dry_db` |
 | Chunk / crossfade | 60 s / 1 s | Hardcoded |
 
 > Note: DeepFilterNet 0.5.x imports `torchaudio.backend.common`, which newer
@@ -753,7 +753,11 @@ broadband compressor (off at `--strength 0`, where every band is 1:1). Then a
 to restore the "air" heavy denoise/dereverb removes and to cut through tiny
 speakers — rather than boosting (possibly noisy) existing highs. Runs before the
 loudness measurement so the added energy is counted in the loudness math. Strength
-maps `amount 0 → 2.5`; deliberately conservative. Then **two-pass EBU R128
+maps `amount 0 → 1.0` at a smooth `drive` of 4 — deliberately *gentle*: a touch of
+air (~+3 dB in the presence band), not a sheen. Over-driving it is the easiest way
+to make a mix sound harsh and noisy, so the ceiling is low; `Config.exciter_amount`
+overrides it directly (a fine-tuning knob) and the body/punch of the mix lives in
+the low-mids and loudness below, not here. Then **two-pass EBU R128
 loudness normalization** (`loudnorm`, always on): the first pass measures, the
 second applies a **linear** gain to hit exactly the target LUFS. Finally a
 **brickwall true-peak limiter** (`alimiter`, `level=false` so it never fights the
@@ -775,7 +779,8 @@ strength, even 0).
 | Mid-band threshold | `0.30 → 0.10` amplitude (0.14 @ 0.8) | **Strength** |
 | Exciter enabled | on | CLI `--no-exciter` |
 | Exciter source band | 4–8 kHz (freq=4000, ceil=16000) | Hardcoded |
-| Exciter amount | `0 → 2.5` (2.0 @ 0.8) | **Strength** |
+| Exciter amount | `0 → 1.0` (0.8 @ 0.8) | **Strength** / `Config.exciter_amount` |
+| Exciter drive | 4.0 (smoother harmonics) | `Config.exciter_drive` |
 | Integrated loudness target | −16 LUFS | CLI `--lufs` |
 | True-peak ceiling | −1.5 dBTP | `Config.true_peak_db` |
 | Normalization | two-pass, linear | Hardcoded |

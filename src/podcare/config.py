@@ -59,11 +59,12 @@ class Config:
     # Denoise — DeepFilterNet3 (neural, full-band 48 kHz). Strength sets the
     # attenuation ceiling (see df_atten_lim_db). denoise_dry_db mixes a fixed
     # share of the pre-denoise signal back in ("ambience preservation"): it
-    # bounds the worst-case suppression near 12 dB so marginal quiet words and
+    # bounds the worst-case suppression near 15 dB so marginal quiet words and
     # room tone are softened, never erased — full removal sounds unnaturally
-    # dead. A character knob (absolute, not strength-scaled).
+    # dead. A character knob (absolute, not strength-scaled); more negative =
+    # cleaner but riskier for very soft speech.
     denoise: bool = True
-    denoise_dry_db: float = -12.0
+    denoise_dry_db: float = -15.0
 
     # Dereverb (WPE linear prediction; complements DeepFilterNet)
     dereverb: bool = True
@@ -123,8 +124,15 @@ class Config:
     true_peak_db: float = -1.5
     lossy_bitrate: str = "192k"  # MP3/AAC bitrate; ignored for WAV/FLAC
 
-    # Harmonic presence exciter (inside master; synthesizes "air" above ~8 kHz)
+    # Harmonic presence exciter (inside master; synthesizes "air" above ~8 kHz).
+    # A *touch* of air, deliberately gentle — it is the easiest stage to overdo,
+    # and over-driving it both sounds harsh and excites residual HF noise into a
+    # brittle sheen on the voice. exciter_amount overrides the strength-derived
+    # value (None = follow strength); exciter_drive is the harmonic-generation
+    # intensity (ffmpeg aexciter `drive`, 0.1..10 — lower = smoother).
     exciter: bool = True
+    exciter_amount: float | None = None
+    exciter_drive: float = 4.0
 
     # Intro/outro bookends — optional sounds assembled around the finished
     # program (loudness-matched, 100 ms equal-power crossfades). Assembly, not
@@ -198,10 +206,17 @@ class Config:
     def resonance_max_cut_db(self) -> float:
         return _lerp(0.0, 10.0, self.s)
 
-    # Exciter: ffmpeg aexciter `amount`. 0 adds no harmonics (identity);
-    # 2.5 ceiling is deliberately conservative ("easy to overdo").
-    def exciter_amount(self) -> float:
-        return _lerp(0.0, 2.5, self.s)
+    # Exciter: ffmpeg aexciter `amount`. 0 adds no harmonics (identity). The
+    # 1.0 ceiling keeps the highs alive without harshness — measured on speech,
+    # amount 0.8 (the default at strength 0.8) at drive 4 lifts the >6 kHz
+    # presence band ~+3 dB (a tasteful "air"); the old 2.5/8.5 ceiling lifted it
+    # ~+12 dB, which read as harsh and noisy. Punch/body lives in the low-mids
+    # and loudness, not here, so this is air, not "koule". exciter_amount
+    # overrides (None = follow strength).
+    def eff_exciter_amount(self) -> float:
+        if self.exciter_amount is not None:
+            return self.exciter_amount
+        return _lerp(0.0, 1.0, self.s)
 
     # Plosives: 0 flags ~nothing (very high burst threshold, shallow duck); 1
     # catches the most and ducks hardest. Target stays below burst at all s.

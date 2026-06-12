@@ -171,7 +171,7 @@ def dehum(input_paths: list[str], output_dir: str, strength: float = 0.8) -> dic
 
 @mcp.tool()
 def denoise(input_paths: list[str], output_dir: str, strength: float = 0.8,
-            dry_db: float = -12.0) -> dict:
+            dry_db: float = -15.0) -> dict:
     """Broadband neural denoise (DeepFilterNet3, 48 kHz full-band).
 
     Args:
@@ -397,9 +397,11 @@ def mixdown(input_paths: list[str], output_dir: str) -> dict:
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 def master(input_path: str, output_path: str, strength: float = 0.8,
-           compress: bool = True, exciter: bool = True, lufs: float = -16.0,
-           true_peak_db: float = -1.5, out_sr: int = 44100, bitrate: str = "192k",
-           intro_sound: str | None = None, outro_sound: str | None = None) -> dict:
+           compress: bool = True, exciter: bool = True,
+           exciter_amount: float | None = None, exciter_drive: float = 4.0,
+           lufs: float = -16.0, true_peak_db: float = -1.5, out_sr: int = 44100,
+           bitrate: str = "192k", intro_sound: str | None = None,
+           outro_sound: str | None = None) -> dict:
     """Master one mono program and encode it: MB-comp → exciter → loudnorm →
     TP-limit → optional intro/outro bookends → encode.
 
@@ -413,8 +415,11 @@ def master(input_path: str, output_path: str, strength: float = 0.8,
             (both off at 0). Loudness and the true-peak limiter are absolute
             and always applied.
         compress: Enable the multiband compressor.
-        exciter: Enable the harmonic presence exciter (synthesized 8–16 kHz
-            "air", included in the loudness measurement).
+        exciter: Enable the harmonic presence exciter (a *touch* of synthesized
+            8–16 kHz "air", included in the loudness measurement).
+        exciter_amount: Override the exciter amount (None follows strength,
+            ceiling 1.0). Higher = more air; deliberately gentle by default.
+        exciter_drive: Harmonic-generation intensity (0.1..10; lower = smoother).
         lufs: Integrated-loudness target (EBU R128), validated -40..-5.
         true_peak_db: True-peak ceiling in dBTP.
         out_sr: Output sample rate (single final resample).
@@ -424,8 +429,10 @@ def master(input_path: str, output_path: str, strength: float = 0.8,
         outro_sound: Optional sound placed after the program (same treatment).
     """
     audio_io.require_ffmpeg()
-    cfg = Config(strength=strength, compress=compress, exciter=exciter, lufs=lufs,
-                 true_peak_db=true_peak_db, out_sr=out_sr, lossy_bitrate=bitrate)
+    cfg = Config(strength=strength, compress=compress, exciter=exciter,
+                 exciter_amount=exciter_amount, exciter_drive=exciter_drive,
+                 lufs=lufs, true_peak_db=true_peak_db, out_sr=out_sr,
+                 lossy_bitrate=bitrate)
     session = load_session([Path(input_path)], cfg)
     if len(session.tracks) != 1:
         raise ValueError("master expects exactly one input (a mono program)")

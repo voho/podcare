@@ -55,7 +55,7 @@ def test_df_atten_is_finite_and_continuous():
     lambda c: c.comp_ratio(),
     lambda c: c.dropout_max_gap_ms(),
     lambda c: c.resonance_max_cut_db(),
-    lambda c: c.exciter_amount(),
+    lambda c: c.eff_exciter_amount(),
 ])
 def test_intensity_rises_with_strength(getter):
     low, high = getter(Config(strength=0.1)), getter(Config(strength=0.9))
@@ -86,6 +86,12 @@ def test_explicit_overrides_beat_strength():
     assert c.eff_target_pause() == 1.1
 
 
+def test_exciter_amount_override_beats_strength():
+    assert Config(strength=0.8).eff_exciter_amount() == pytest.approx(0.8)  # ceiling 1.0
+    assert Config(strength=0.8, exciter_amount=0.3).eff_exciter_amount() == 0.3
+    assert Config(strength=0.0, exciter_amount=0.5).eff_exciter_amount() == 0.5  # override at s=0
+
+
 def test_filler_sensitivity_follows_strength_when_unset():
     assert Config(strength=1.0).eff_filler_sensitivity() == pytest.approx(0.7)
     assert Config(strength=0.0).eff_filler_sensitivity() == 0.0
@@ -96,7 +102,7 @@ def test_new_stage_helpers_are_identity_at_zero_strength():
     assert c.dropout_max_gap_ms() == 0.0
     # max_cut=0 zeroes all reduction; margin_db is the sensitivity, not the gate
     assert c.resonance_max_cut_db() == 0.0
-    assert c.exciter_amount() == 0.0
+    assert c.eff_exciter_amount() == 0.0
 
 
 def test_plosive_target_below_burst_threshold():
