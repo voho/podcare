@@ -12,6 +12,7 @@ from podcare.stages.gate import gate_track
 from podcare.stages.mixdown import mixdown_session
 from podcare.stages.plosives import deplosive_track
 from podcare.stages.repair import repair_track
+from podcare.stages.resonance import resonance_track
 from podcare.stages.silence import find_pause_cuts, tighten_track
 from podcare.stages.tonebalance import tonebalance_track
 
@@ -536,3 +537,34 @@ class TestDropouts:
             local = np.abs(np.diff(out[clean].astype(np.float64)))
             step = abs(float(out[seam]) - float(out[seam - 1]))
             assert step < 10.0 * float(np.percentile(local, 95) + 1e-6), f"click at seam {seam}"
+
+
+class TestResonance:
+    @staticmethod
+    def _band_rms(x: np.ndarray, lo: float, hi: float, half: str = "second") -> float:
+        from scipy.signal import butter, sosfilt
+        sos = butter(4, [lo, hi], btype="bandpass", fs=SR, output="sos")
+        y = sosfilt(sos, x.astype(np.float64))
+        y = y[len(y) // 2:] if half == "second" else y[: len(y) // 2]
+        return float(np.sqrt(np.mean(y ** 2)))
+
+    def test_tames_injected_ring(self):
+        voice = speech_like(6, seed=7, level=0.25)
+        t = np.arange(len(voice)) / SR
+        ring = (0.15 * np.sin(2 * np.pi * 3000 * t)).astype(np.float32)
+        ring[: len(ring) // 2] = 0.0          # transient: rings only in 2nd half
+        audio = (voice + ring).astype(np.float32)
+        out = resonance_track(Track("x", audio), CFG).audio
+        assert out.shape == audio.shape and np.isfinite(out).all()
+        # ring band cut by >= 3 dB in the ringing half...
+        assert (self._band_rms(out, 2900, 3100)
+                < self._band_rms(audio, 2900, 3100) * 0.71)
+        # ...while the non-ringing half is essentially untouched broadband
+        in_rms = float(np.std(audio[: len(audio) // 2])) + 1e-9
+        out_rms = float(np.std(out[: len(out) // 2])) + 1e-9
+        assert abs(20 * np.log10(out_rms / in_rms)) < 0.5
+
+    def test_strength_zero_is_identity(self):
+        audio = speech_like(4, seed=8)
+        out = resonance_track(Track("x", audio), Config(strength=0.0)).audio
+        assert np.array_equal(out, audio)
