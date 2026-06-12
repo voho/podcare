@@ -1,8 +1,9 @@
 import numpy as np
 import pytest
 
-from podcare.dsp import (block_rms, gain_to_samples, merge_intervals,
-                         process_chunked, remove_intervals, smooth_gain)
+from podcare.dsp import (block_rms, crossfade_concat, gain_to_samples,
+                         merge_intervals, process_chunked, remove_intervals,
+                         smooth_gain)
 
 SR = 48000
 
@@ -80,3 +81,25 @@ def test_process_chunked_identity_roundtrip():
     out = process_chunked(audio, SR, lambda c: c, chunk_s=1.0, overlap_s=0.25)
     assert out.shape == audio.shape
     assert np.allclose(out, audio, atol=1e-5)
+
+
+def test_crossfade_concat_blends_smoothly():
+    a = np.ones(1000, dtype=np.float32)
+    b = np.full(1000, 0.5, dtype=np.float32)
+    out = crossfade_concat([a, b], xf=200)
+    assert len(out) == 1800  # 1000 + 1000 - 200 overlap
+    blend = out[800:1000]
+    assert blend[0] == pytest.approx(1.0, abs=0.05)    # starts at a's level
+    assert blend[-1] == pytest.approx(0.5, abs=0.05)   # ends at b's level
+    # equal-power curves: correlated material may peak up to sqrt(2), never more
+    assert float(np.max(blend)) < np.sqrt(2.0) + 0.01
+    assert np.isfinite(out).all()
+
+
+def test_crossfade_concat_single_and_empty():
+    a = np.ones(100, dtype=np.float32)
+    assert np.array_equal(crossfade_concat([a], xf=50), a)
+    assert len(crossfade_concat([], xf=50)) == 0
+    # segments shorter than 2 overlap samples are butt-joined, not dropped
+    out = crossfade_concat([a, np.ones(1, dtype=np.float32)], xf=50)
+    assert len(out) == 101

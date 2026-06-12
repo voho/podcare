@@ -85,6 +85,30 @@ def merge_intervals(intervals: list[tuple[float, float]],
     return merged
 
 
+def crossfade_concat(segments: list[np.ndarray], xf: int) -> np.ndarray:
+    """Join segments with equal-power crossfades of up to `xf` samples.
+
+    Each boundary blends the tail of the running output with the head of the
+    next segment over min(xf, len(out), len(seg)) samples using cos/sin
+    curves, so correlated material keeps ~constant power across the join.
+    Boundaries with fewer than 2 overlap samples are butt-joined. Preserves
+    the dtype of segments[0]; the caller keeps segments dtype-consistent.
+    """
+    segments = [s for s in segments if len(s) > 0]
+    if not segments:
+        return np.zeros(0, dtype=np.float32)
+    out = segments[0].copy()
+    for seg in segments[1:]:
+        n = min(xf, len(out), len(seg))
+        if n >= 2:
+            t = np.linspace(0.0, np.pi / 2.0, n, dtype=np.float32)
+            out[-n:] = out[-n:] * np.cos(t) + seg[:n] * np.sin(t)
+            out = np.concatenate([out, seg[n:]])
+        else:
+            out = np.concatenate([out, seg])
+    return out
+
+
 def remove_intervals(audio: np.ndarray, sr: int, intervals: list[tuple[float, float]],
                      xfade_s: float = 0.015) -> np.ndarray:
     """Cut (start, end) second intervals out of the audio with equal-power crossfades.
@@ -112,17 +136,7 @@ def remove_intervals(audio: np.ndarray, sr: int, intervals: list[tuple[float, fl
     segments = [s for s in segments if len(s) > 0]
     if not segments:
         return audio[:0]
-
-    out = segments[0].copy()
-    for seg in segments[1:]:
-        n = min(xf, len(out), len(seg))
-        if n >= 2:
-            t = np.linspace(0.0, np.pi / 2.0, n, dtype=np.float32)
-            out[-n:] = out[-n:] * np.cos(t) + seg[:n] * np.sin(t)
-            out = np.concatenate([out, seg[n:]])
-        else:
-            out = np.concatenate([out, seg])
-    return out
+    return crossfade_concat(segments, xf)
 
 
 def process_chunked(audio: np.ndarray, sr: int, fn, *, chunk_s: float,
