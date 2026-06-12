@@ -6,6 +6,7 @@ from podcare.session import Session, Track
 from podcare.stages.align import align_session
 from podcare.stages.deess import deess_track
 from podcare.stages.dereverb import dereverb_track
+from podcare.stages.dropouts import restore_dropouts_track
 from podcare.stages.fillers import find_filler_intervals
 from podcare.stages.gate import gate_track
 from podcare.stages.mixdown import mixdown_session
@@ -465,3 +466,73 @@ class TestSilence:
         # 10 s in, ~5.3 s of the pause removed.
         assert out_s < 5.5, f"pause not tightened (out {out_s:.1f} s)"
         assert out_s > 3.5, f"speech was cut (out {out_s:.1f} s)"
+
+
+class TestDropouts:
+    @staticmethod
+    def _signal_with_holes(holes: list[tuple[float, float]]) -> tuple[np.ndarray, np.ndarray]:
+        """6 s tone with a quiet lead-in (so speech_threshold has a noise floor),
+        with (at_s, dur_s) holes zeroed out. Returns (clean, damaged)."""
+        n = 6 * SR
+        t = np.arange(n) / SR
+        clean = (0.3 * (np.sin(2 * np.pi * 160 * t) + 0.4 * np.sin(2 * np.pi * 320 * t)))
+        clean[: SR // 2] *= 0.003  # near-silent lead-in establishes the noise floor
+        clean = clean.astype(np.float32)
+        damaged = clean.copy()
+        for at, dur in holes:
+            damaged[int(at * SR): int((at + dur) * SR)] = 0.0
+        return clean, damaged
+
+    def test_fills_short_gaps(self):
+        clean, damaged = self._signal_with_holes([(2.0, 0.020), (4.0, 0.035)])
+        out = restore_dropouts_track(Track("x", damaged), CFG).audio
+        assert out.shape == damaged.shape and np.isfinite(out).all()
+        for at, dur in [(2.0, 0.020), (4.0, 0.035)]:
+            seg = out[int(at * SR): int((at + dur) * SR)].astype(np.float64)
+            ref = clean[int((at - 0.05) * SR): int(at * SR)].astype(np.float64)
+            seg_rms = np.sqrt(np.mean(seg ** 2))
+            ref_rms = np.sqrt(np.mean(ref ** 2))
+            assert seg_rms > 0.5 * ref_rms, f"gap at {at}s not filled ({seg_rms:.4f} vs {ref_rms:.4f})"
+
+    def test_leaves_long_gaps_alone(self):
+        _, damaged = self._signal_with_holes([(2.0, 0.080)])  # 80 ms > 40 ms cap at s=0.8
+        out = restore_dropouts_track(Track("x", damaged), CFG).audio
+        seg = out[int(2.0 * SR): int(2.08 * SR)]
+        assert np.max(np.abs(seg)) < 1e-6, "80 ms gap must not be fabricated"
+
+    def test_leaves_real_pauses_alone(self):
+        # a 20 ms quiet dip inside a 400 ms pause is a pause, not a dropout
+        n = 6 * SR
+        t = np.arange(n) / SR
+        sig = (0.3 * np.sin(2 * np.pi * 160 * t)).astype(np.float32)
+        sig[: SR // 2] *= 0.003
+        sig[int(2.8 * SR): int(3.2 * SR)] *= 0.003          # real pause
+        before = sig.copy()
+        out = restore_dropouts_track(Track("x", sig), CFG).audio
+        pause = slice(int(2.8 * SR), int(3.2 * SR))
+        assert np.array_equal(out[pause], before[pause])
+
+    def test_strength_zero_is_identity(self):
+        _, damaged = self._signal_with_holes([(2.0, 0.020)])
+        out = restore_dropouts_track(Track("x", damaged), Config(strength=0.0)).audio
+        assert np.array_equal(out, damaged)
+
+    def test_fill_has_no_seam_clicks_on_broadband(self):
+        voice = speech_like(6, seed=31, level=0.3)
+        # ensure speech is active around the hole (envelope gating is random)
+        t = np.arange(len(voice)) / SR
+        voice = (voice + 0.2 * np.sin(2 * np.pi * 200 * t).astype(np.float32)).astype(np.float32)
+        start, end = int(2.0 * SR), int(2.02 * SR)
+        damaged = voice.copy()
+        damaged[start:end] = 0.0
+        out = restore_dropouts_track(Track("x", damaged), CFG).audio
+        filled = out[start:end]
+        assert float(np.sqrt(np.mean(filled.astype(np.float64) ** 2))) > 1e-4, "hole not filled"
+        # seam continuity: the step across each seam must be comparable to the
+        # CLEAN side's own steps (one-sided window so the fill can't inflate
+        # the bound and mask an unfeathered splice)
+        for seam, clean in ((start, slice(start - 480, start)),
+                            (end, slice(end, end + 480))):
+            local = np.abs(np.diff(out[clean].astype(np.float64)))
+            step = abs(float(out[seam]) - float(out[seam - 1]))
+            assert step < 10.0 * float(np.percentile(local, 95) + 1e-6), f"click at seam {seam}"
