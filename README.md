@@ -9,10 +9,11 @@ podcare host.wav guest.wav -o episode.mp3
 ```
 
 **Input:** one or more WAV/MP3/FLAC files (one per mic/recorder; anything ffmpeg reads).
-**Output:** one WAV/MP3/FLAC/M4A — aligned, declipped, de-hummed, denoised
-(DeepFilterNet3 neural enhancement), dereverbed, tonally balanced, de-clicked,
-de-plosived, de-essed, breath-controlled, filler-words removed, pauses tightened,
-loudness-leveled, multiband-compressed, loudness-normalized and true-peak limited
+**Output:** one WAV/MP3/FLAC/M4A — aligned, gap-filled, declipped, de-hummed,
+denoised (DeepFilterNet3 neural enhancement), dereverbed, tonally balanced,
+de-clicked, de-plosived, de-essed, resonance-tamed, crosstalk-gated,
+breath-controlled, filler-words removed, pauses tightened, loudness-leveled,
+multiband-compressed, presence-excited, loudness-normalized and true-peak limited
 to podcast standard (−16 LUFS / −1.5 dBTP). Output is 44.1 kHz (16-bit + dither
 for WAV/FLAC); processing runs internally at 48 kHz float32. Defaults favor
 quality over speed.
@@ -31,8 +32,8 @@ uv run podcare --help
 Everything runs on CPU. The first run that uses filler removal downloads the
 Whisper model (`large-v3` is ~3 GB; pick a smaller `--whisper-model` to skip
 that) plus the wav2vec2 forced-alignment model (~360 MB), both cached afterward.
-DeepFilterNet3 weights ship inside the `deepfilternet` package, so denoise works
-offline from the start.
+The first denoise likewise fetches the small (~9 MB) DeepFilterNet3 model from
+GitHub and caches it; after that first download, everything runs offline.
 
 ---
 
@@ -166,10 +167,13 @@ clip-safe, but its tone and dynamics are untouched — useful as an A/B baseline
 [pipeline section](#the-pipeline) below, and every value is derived from
 [src/podcare/config.py](src/podcare/config.py) (the single source of truth).
 
-Two stages ignore strength on purpose: **repair** and **align** are *correctness*
-operations (fix clipping, fix timing/polarity), not matters of degree. Loudness
-normalization and the true-peak limiter are absolute delivery settings and also
-run regardless of strength.
+**align** ignores strength on purpose: it's a *correctness* operation (fix
+timing/polarity), not a matter of degree, so it still runs at `--strength 0`.
+**repair** has no strength-scaled parameters either (declip is on/off, the
+high-pass cutoff is fixed) — but, like every enhancement stage, it is skipped
+entirely at `--strength 0`, so the raw baseline carries no declicking/declipping.
+Loudness normalization and the true-peak limiter are absolute delivery settings
+and also run regardless of strength.
 
 You can still override individual stages — `--filler-sensitivity`, `--max-pause`,
 `--target-pause`, `--lufs`, `--language` — and an explicit value always wins over
@@ -404,7 +408,8 @@ Tracks are then zero-padded to equal length.
 
 **How it works.** **DeepFilterNet3**, a full-band 48 kHz neural speech-enhancement
 model that separates voice from noise far more cleanly than classical methods.
-Weights ship inside the package (no download). Processed in **60 s chunks with a
+The ~9 MB model is downloaded from GitHub on first use and cached, so only the
+very first denoise needs a network. Processed in **60 s chunks with a
 1 s crossfade** so memory stays bounded on hour-long files. A fixed share of the
 **dry signal is mixed back** ("ambience preservation"): it bounds the worst-case
 suppression near 15 dB, so marginal quiet words and room tone are softened rather
@@ -478,7 +483,7 @@ subtle even at full strength.
 | Correction fraction | `strength / 3` (0.27 @ 0.8) | **Strength** |
 | Boost clamp | +3 dB | Hardcoded |
 | Cut clamp | −6 dB | Hardcoded |
-| Filters | low/high shelf + low-mid (300 Hz) + presence (3 kHz) bells | Hardcoded |
+| Filters | low shelf (120 Hz), "air" high shelf (7 kHz), low-mid (300 Hz) + presence (3 kHz) bells | Hardcoded |
 | Target curve | produced broadcast-voice LTAS | Hardcoded |
 
 ---
@@ -504,7 +509,7 @@ Huge at strength 0 (nothing triggers).
 | Parameter | Value | Controlled by |
 |---|---|---|
 | Stage enabled | on | CLI `--no-declick` |
-| Crest threshold | `40 → 8×` (14× @ 0.8) | **Strength** |
+| Crest threshold | `40 → 8×` (14.4× @ 0.8) | **Strength** |
 | Detection band | 1500–6000 Hz | Hardcoded |
 | Quiet-neighbourhood gate | < 35% of speech reference | Hardcoded |
 | Local-median window | ~250 ms | Hardcoded |
@@ -850,8 +855,8 @@ no-op at strength 0); none need a new heavyweight dependency.
   strength→stage mapping) in [src/podcare/config.py](src/podcare/config.py).
 - **ffmpeg** for decode/encode and the repair + master filters (incl. the
   multiband compressor and true-peak limiter); **numpy/scipy** for the hand-written
-  DSP (de-hum, tonal-balance EQ, de-click, plosives, de-ess, gate, breath,
-  leveler, tighten, align); **DeepFilterNet/torch**, **nara-wpe**, and
+  DSP (dropout restoration, de-hum, tonal-balance EQ, de-click, plosives, de-ess,
+  resonance, gate, breath, leveler, tighten, align); **DeepFilterNet/torch**, **nara-wpe**, and
   **faster-whisper + WhisperX** for the ML/heavy stages; **soxr** for the single
   final resample.
 - **Robustness by design.** Heavy spectral stages (denoise, dereverb, resonance,

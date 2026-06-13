@@ -2,9 +2,10 @@
 
 DeepFilterNet3 is a full-band 48 kHz neural speech-enhancement model — it
 separates voice from noise far more cleanly than classical methods and also
-tames light reverb and breath noise. Weights ship inside the `deepfilternet`
-package, so it runs offline. Processed in chunks with a crossfade so memory
-stays bounded on hour-long tracks. Strength sets the attenuation ceiling.
+tames light reverb and breath noise. The model (~9 MB) is downloaded from GitHub
+on first use and cached, so only the very first denoise needs a network; after
+that it runs offline. Processed in chunks with a crossfade so memory stays
+bounded on hour-long tracks. Strength sets the attenuation ceiling.
 """
 
 from __future__ import annotations
@@ -88,10 +89,10 @@ def denoise_track(track: Track, cfg: Config) -> Track:
             wet = (wet[: len(chunk)] if len(wet) > len(chunk)
                    else np.pad(wet, (0, len(chunk) - len(wet))))
         # Ambience preservation: blend a fixed share of the dry signal back so
-        # the worst-case suppression is bounded (~12 dB at the default) — DFN
+        # the worst-case suppression is bounded (~15 dB at the default) — DFN
         # at a high attenuation ceiling otherwise erases marginal quiet words
         # outright (and dead-silent gaps sound unnatural). Unity when DFN
-        # removes nothing; -12 dB floor when it removes everything.
+        # removes nothing; -15 dB floor when it removes everything.
         return ((1.0 - dry_mix) * wet + dry_mix * chunk).astype(np.float32)
 
     audio = process_chunked(track.audio, cfg.sr, run_chunk, chunk_s=_DF_CHUNK_S,

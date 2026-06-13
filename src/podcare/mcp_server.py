@@ -179,7 +179,7 @@ def denoise(input_paths: list[str], output_dir: str, strength: float = 0.8,
         output_dir: Directory for the output WAV(s).
         strength: 0..1; sets the attenuation ceiling (0 → 60 dB).
         dry_db: Ambience-preservation dry mix in dB — bounds the worst-case
-            suppression (~12 dB at the default) so marginal quiet words and
+            suppression (~15 dB at the default) so marginal quiet words and
             room tone are softened, never erased.
     """
     return _track_stage(denoise_track, "denoise", input_paths, output_dir,

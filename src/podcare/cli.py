@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     toggles = p.add_argument_group("stage toggles")
     for flag, help_text in [
         ("dropouts", "dropout / short-gap restoration"),
-        ("declip", "distortion repair (declick/declip)"),
+        ("declip", "distortion repair (declick/declip + rumble high-pass)"),
         ("dehum", "mains-hum (50/60 Hz) harmonic removal"),
         ("align", "inter-track offset/polarity correction"),
         ("denoise", "noise reduction"),
@@ -89,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("tighten", "pause tightening"),
         ("leveler", "slow segment-loudness leveling"),
         ("exciter", "harmonic presence exciter"),
-        ("master", "compression + loudness normalization"),
+        ("master", "multiband compression + loudness normalization + limiting"),
     ]:
         toggles.add_argument(f"--no-{flag}", action="store_true", help=f"disable {help_text}")
     return p
